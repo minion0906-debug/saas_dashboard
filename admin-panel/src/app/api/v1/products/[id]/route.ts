@@ -1,0 +1,441 @@
+/**
+ * Products API v1 - Single Product Operations
+ *
+ * GET /api/v1/products/:id - Get product by ID
+ * PATCH /api/v1/products/:id - Update product
+ * DELETE /api/v1/products/:id - Delete product
+ */
+
+import { NextRequest } from 'next/server';
+import { revalidateTag } from 'next/cache';
+import {
+  handleCorsPreFlight,
+  jsonResponse,
+  noContentResponse,
+  apiError,
+  authenticate,
+  handleApiError,
+  parseJsonBody,
+  ApiValidationError,
+  successResponse,
+  API_SCOPES,
+  parseEmbed,
+  buildProductSelect,
+  transformEmbeddedRelations,
+} from '@/lib/api';
+import { z } from 'zod';
+import {
+  validateProductId,
+  validateUpdateProduct,
+  PRODUCT_API_FIELDS,
+} from '@/lib/validations/product';
+import { mapApiInputToProductRow, ProductCategoriesSchema, ProductTagsSchema, BundleItemIdsSchema } from '@/lib/api/dto/product';
+import { upsertBundleItems } from '@/lib/services/bundle-items';
+import { hasProductBeenSold } from '@/lib/validations/product-type-guard';
+
+interface RouteParams {
+  params: Promise<{ id: string }>;
+}
+
+export async function OPTIONS(request: NextRequest) {
+  return handleCorsPreFlight(request);
+}
+
+/**
+ * GET /api/v1/products/:id
+ *
+ * Retrieve a single product by ID.
+ * Includes product categories if any.
+ */
+export async function GET(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { supabase } = await authenticate(request, [API_SCOPES.PRODUCTS_READ]);
+    const { id } = await params;
+
+    // Validate ID format
+    const idValidation = validateProductId(id);
+    if (!idValidation.isValid) {
+      return apiError(request, 'INVALID_INPUT', 'Invalid product ID format');
+    }
+
+    const embedParam = request.nextUrl.searchParams.get('embed') ?? 'categories,tags';
+    const embed = parseEmbed(embedParam);
+    const selectFields = buildProductSelect(PRODUCT_API_FIELDS, embed);
+
+    const { data: product, error } = await supabase
+      .from('products')
+      .select(selectFields)
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') return apiError(request, 'NOT_FOUND', 'Product not found');
+      console.error('[products.GET]', error);
+      return apiError(request, 'INTERNAL_ERROR', 'Failed to fetch product');
+    }
+
+    const result = transformEmbeddedRelations(product as unknown as Record<string, unknown>);
+    return jsonResponse(successResponse(result), request);
+  } catch (error) {
+    return handleApiError(error, request);
+  }
+}
+
+/**
+ * PATCH /api/v1/products/:id
+ *
+ * Update a product. Only provided fields will be updated.
+ *
+ * Request body:
+ * - name: string (optional)
+ * - slug: string (optional)
+ * - description: string (optional)
+ * - price: number (optional)
+ * - currency: string (optional)
+ * - is_active: boolean (optional)
+ * - is_featured: boolean (optional)
+ * - icon: string (optional)
+ * - content_delivery_type: string (optional)
+ * - content_config: object (optional)
+ * - available_from: string ISO date (optional)
+ * - available_until: string ISO date (optional)
+ * - auto_grant_duration_days: number (optional)
+ * - categories: string[] (optional, replaces existing categories)
+ * - tags: string[] (optional, replace-semantics — replaces all existing tags)
+ */
+export async function PATCH(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { supabase } = await authenticate(request, [API_SCOPES.PRODUCTS_WRITE]);
+    const { id } = await params;
+
+    // Validate ID format
+    const idValidation = validateProductId(id);
+    if (!idValidation.isValid) {
+      return apiError(request, 'INVALID_INPUT', 'Invalid product ID format');
+    }
+
+    // Parse request body
+    const body = await parseJsonBody<Record<string, unknown>>(request);
+
+    // Extract categories, tags, and bundle components separately
+    const { categories: categoriesRaw, tags: tagsRaw, bundleItemIds: bundleItemIdsRaw, ...productDataRaw } = body;
+
+    let categories: string[] | undefined;
+    let tags: string[] | undefined;
+    let bundleItemIds: string[] | undefined;
+    try {
+      categories = ProductCategoriesSchema.parse(categoriesRaw);
+      tags = ProductTagsSchema.parse(tagsRaw);
+      bundleItemIds = BundleItemIdsSchema.parse(bundleItemIdsRaw);
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        throw new ApiValidationError('Validation failed', {
+          _errors: err.issues.map((i) => `${i.path.join('.') || '_'}: ${i.message}`),
+        });
+      }
+      throw err;
+    }
+
+    let sanitizedData: Record<string, unknown>;
+    try {
+      sanitizedData = mapApiInputToProductRow(productDataRaw, 'update');
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        throw new ApiValidationError('Validation failed', {
+          _errors: err.issues.map((i) => `${i.path.join('.') || '_'}: ${i.message}`),
+        });
+      }
+      throw err;
+    }
+
+    const validation = validateUpdateProduct(sanitizedData);
+    if (!validation.isValid) {
+      throw new ApiValidationError('Validation failed', {
+        _errors: validation.errors,
+      });
+    }
+
+    // If slug is being changed, check uniqueness
+    if (sanitizedData.slug) {
+      const { data: existingProduct, error: slugCheckError } = await supabase
+        .from('products')
+        .select('id')
+        .eq('slug', sanitizedData.slug)
+        .neq('id', id)
+        .maybeSingle();
+
+      if (slugCheckError) {
+        console.error('[products.PATCH]', slugCheckError);
+        return apiError(request, 'INTERNAL_ERROR', 'Failed to validate slug');
+      }
+
+      if (existingProduct) {
+        return apiError(request, 'ALREADY_EXISTS', 'A product with this slug already exists');
+      }
+    }
+
+    // Check product exists before update
+    const { data: existingCheck, error: existsError } = await supabase
+      .from('products')
+      .select('id, product_type, is_bundle, is_active')
+      .eq('id', id)
+      .single();
+
+    if (existsError || !existingCheck) {
+      return apiError(request, 'NOT_FOUND', 'Product not found');
+    }
+
+    // Server-side empty-bundle guard (mirrors the client PublishChecklist): if the
+    // effective post-update state is an ACTIVE bundle, it must have >= 1 component.
+    // Effective is_bundle/is_active fall back to the existing row when not in the patch;
+    // the component count is the incoming bundleItemIds when provided, else the current
+    // number of bundle_items rows.
+    {
+      const effIsBundle =
+        typeof sanitizedData.is_bundle === 'boolean'
+          ? sanitizedData.is_bundle
+          : existingCheck.is_bundle === true;
+      const effIsActive =
+        typeof sanitizedData.is_active === 'boolean'
+          ? sanitizedData.is_active
+          : existingCheck.is_active === true;
+      if (effIsBundle && effIsActive) {
+        let componentCount: number;
+        if (bundleItemIds !== undefined) {
+          componentCount = bundleItemIds.length;
+        } else {
+          const { count, error: countError } = await supabase
+            .from('bundle_items')
+            .select('id', { count: 'exact', head: true })
+            .eq('bundle_product_id', id);
+          if (countError) {
+            console.error('[products.PATCH bundle guard]', countError);
+            return apiError(request, 'INTERNAL_ERROR', 'Failed to validate bundle components');
+          }
+          componentCount = count ?? 0;
+        }
+        if (componentCount < 1) {
+          throw new ApiValidationError('Validation failed', {
+            _errors: ['An active bundle must have at least one component (bundleItemIds)'],
+          });
+        }
+      }
+    }
+
+    // forbid product_type changes once a product has any sale, access
+    // grant, or subscription. Existing receipts/access rows would silently
+    // misrepresent what was delivered to the customer.
+    if (
+      typeof sanitizedData.product_type === 'string' &&
+      sanitizedData.product_type !== existingCheck.product_type
+    ) {
+      const sold = await hasProductBeenSold(supabase, id);
+      if (sold) {
+        throw new ApiValidationError('Validation failed', {
+          _errors: [
+            'product_type cannot be changed after the product has any payment, access, or subscription record',
+          ],
+        });
+      }
+    }
+
+    // Update product (only if there are fields to update)
+    let product = existingCheck;
+    if (Object.keys(sanitizedData).length > 0) {
+      const { data: updatedProduct, error: updateError } = await supabase
+        .from('products')
+        .update(sanitizedData)
+        .eq('id', id)
+        .select(PRODUCT_API_FIELDS)
+        .single();
+
+      if (updateError) {
+        const code = (updateError as { code?: string }).code;
+        if (code === '23505') {
+          return apiError(request, 'ALREADY_EXISTS', 'A product with this slug already exists');
+        }
+        if (code === '23514') {
+          throw new ApiValidationError('Validation failed', {
+            _errors: [`Database constraint violation: ${updateError.message}`],
+          });
+        }
+        console.error('[products.PATCH]', updateError);
+        return apiError(request, 'INTERNAL_ERROR', 'Failed to update product');
+      }
+      product = updatedProduct;
+    } else {
+      // If no fields to update, fetch the current product
+      const { data: currentProduct, error: fetchError } = await supabase
+        .from('products')
+        .select(PRODUCT_API_FIELDS)
+        .eq('id', id)
+        .single();
+
+      if (fetchError) {
+        console.error('[products.PATCH]', fetchError);
+        return apiError(request, 'INTERNAL_ERROR', 'Failed to fetch product');
+      }
+      product = currentProduct;
+    }
+
+    const warnings: string[] = [];
+
+    if (categories !== undefined) {
+      const { error: deleteError } = await supabase
+        .from('product_categories')
+        .delete()
+        .eq('product_id', id);
+
+      if (deleteError) {
+        console.error('[products.PATCH categories]', deleteError);
+        warnings.push('failed to clear existing categories');
+      } else if (categories.length > 0) {
+        const { error: catError } = await supabase
+          .from('product_categories')
+          .insert(categories.map((category_id) => ({ product_id: id, category_id })));
+        if (catError) {
+          console.error('[products.PATCH categories]', catError);
+          warnings.push('failed to attach one or more categories');
+        }
+      }
+    }
+
+    if (tags !== undefined) {
+      const { error: tagDeleteErr } = await supabase.from('product_tags').delete().eq('product_id', id);
+      if (tagDeleteErr) {
+        console.error('[products.PATCH tags]', tagDeleteErr);
+        warnings.push('failed to clear existing tags');
+      } else if (tags.length > 0) {
+        const { error: linkErr } = await supabase.from('product_tags').insert(
+          tags.map((tag_id) => ({ product_id: id, tag_id })),
+        );
+        if (linkErr) {
+          console.error('[products.PATCH tags]', linkErr);
+          warnings.push('failed to attach one or more tags');
+        }
+      }
+    }
+
+    // Persist bundle components when the product is (or is being set to) a bundle.
+    // The bundle_items trigger validates each component; an invalid one throws and
+    // surfaces as a clean validation error (not a 500).
+    const effectiveIsBundle =
+      typeof sanitizedData.is_bundle === 'boolean'
+        ? sanitizedData.is_bundle
+        : existingCheck.is_bundle === true;
+    if (effectiveIsBundle && bundleItemIds !== undefined) {
+      try {
+        await upsertBundleItems(supabase, id, bundleItemIds);
+      } catch (bundleErr) {
+        throw new ApiValidationError('Validation failed', {
+          _errors: [bundleErr instanceof Error ? bundleErr.message : 'Failed to persist bundle components'],
+        });
+      }
+    }
+
+    // Re-fetch with categories and tags to match GET response shape
+    const embed = parseEmbed('categories,tags');
+    const { data: productWithRels, error: refetchErr } = await supabase
+      .from('products')
+      .select(buildProductSelect(PRODUCT_API_FIELDS, embed))
+      .eq('id', id)
+      .single();
+
+    if (refetchErr) {
+      console.error('[products.PATCH refetch]', refetchErr);
+    }
+
+    const refreshedSlug =
+      (productWithRels as { slug?: string } | null)?.slug ??
+      (product as { slug?: string } | null)?.slug ??
+      undefined;
+
+    const baseResult = productWithRels
+      ? transformEmbeddedRelations(productWithRels as unknown as Record<string, unknown>)
+      : product;
+    const result = warnings.length > 0
+      ? { ...(baseResult as Record<string, unknown>), _warnings: warnings }
+      : baseResult;
+    revalidateProductCaches(refreshedSlug);
+    const status = warnings.length > 0 ? 207 : 200;
+    return jsonResponse(successResponse(result), request, status);
+  } catch (error) {
+    return handleApiError(error, request);
+  }
+}
+
+function revalidateProductCaches(slug?: string | null) {
+  // Drop the unstable_cache wrapping getProduct on /p/[slug] so the edit
+  // shows up on the next visit instead of waiting for the 60s revalidate.
+  revalidateTag('product-by-slug', { expire: 0 });
+  if (slug) revalidateTag(`product:${slug}`, { expire: 0 });
+}
+
+/**
+ * DELETE /api/v1/products/:id
+ *
+ * Delete a product. This is a soft operation that respects database constraints.
+ * Products with active user access or payments may fail to delete.
+ */
+export async function DELETE(request: NextRequest, { params }: RouteParams) {
+  try {
+    const { supabase } = await authenticate(request, [API_SCOPES.PRODUCTS_WRITE]);
+    const { id } = await params;
+
+    // Validate ID format
+    const idValidation = validateProductId(id);
+    if (!idValidation.isValid) {
+      return apiError(request, 'INVALID_INPUT', 'Invalid product ID format');
+    }
+
+    // Check product exists (need slug to invalidate cache below)
+    const { data: existingProduct, error: checkError } = await supabase
+      .from('products')
+      .select('id, name, slug')
+      .eq('id', id)
+      .single();
+
+    if (checkError || !existingProduct) {
+      return apiError(request, 'NOT_FOUND', 'Product not found');
+    }
+
+    // Delete product categories first (due to FK constraints)
+    const { error: catDeleteError } = await supabase
+      .from('product_categories')
+      .delete()
+      .eq('product_id', id);
+
+    if (catDeleteError) {
+      console.error('[products.DELETE categories]', catDeleteError);
+      // Continue anyway - might not have any categories
+    }
+
+    // Delete product
+    const { error: deleteError } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', id);
+
+    if (deleteError) {
+      console.error('[products.DELETE]', deleteError);
+
+      // Check for foreign key constraint violations
+      if (deleteError.code === '23503') {
+        return apiError(
+          request,
+          'CONFLICT',
+          'Cannot delete product with existing user access or payments'
+        );
+      }
+
+      return apiError(request, 'INTERNAL_ERROR', 'Failed to delete product');
+    }
+
+    revalidateProductCaches(existingProduct.slug);
+
+    // Return 204 No Content on successful deletion
+    return noContentResponse(request);
+  } catch (error) {
+    return handleApiError(error, request);
+  }
+}

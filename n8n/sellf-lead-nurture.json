@@ -1,0 +1,482 @@
+{
+  "name": "Sellf: Lead Nurture (Listmonk + Follow-up)",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -400
+      ],
+      "parameters": {
+        "color": 1,
+        "width": 700,
+        "height": 440,
+        "content": "## Nurture Sellf free-product leads with Listmonk and a follow-up email\n\n### How it works\n[Sellf](https://github.com/jurczykpawel/sellf) - a self-hosted checkout platform for digital products - emits a signed `lead.captured` webhook whenever someone grabs a free product (a lead magnet). This workflow verifies the `X-Sellf-Signature` HMAC header, acknowledges immediately, subscribes the lead to a [Listmonk](https://listmonk.app) list (with the product stored as attributes), waits three days and sends a personal follow-up email over your own SMTP - the moment they've had time to consume the freebie.\n\n### Setup\n1. In Sellf admin open **Settings → Webhooks**, add an endpoint with this workflow's Production URL and copy the signing secret.\n2. In Listmonk create an API user and note the target list's id.\n3. Fill in **Configuration (EDIT ME)**: webhook secret, Listmonk URL/user/token/list id and your sender address.\n4. Connect SMTP credentials on **Send Follow-up Email** and edit its subject/body.\n5. See the red note on **Verify Signature** for one required n8n environment setting, then activate.\n\n### Customization tips\nChange the wait (3 days by default) on **Wait 3 Days**. Build the whole sequence in Listmonk instead? Drop the wait + email nodes and let a Listmonk campaign series take over. Swap Listmonk for MailerLite/Mailchimp by replacing one node."
+      }
+    },
+    {
+      "id": "sticky-receive",
+      "name": "Section: Receive & Verify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 1120,
+        "height": 380,
+        "content": "## Receive & Verify\nAccepts the Sellf webhook and checks its HMAC signature before trusting the payload."
+      }
+    },
+    {
+      "id": "sticky-filter",
+      "name": "Section: Acknowledge & Filter",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        440,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 220,
+        "content": "## Acknowledge & Filter\nResponds immediately, keeps only `lead.captured` and shapes the lead."
+      }
+    },
+    {
+      "id": "sticky-nurture",
+      "name": "Section: Subscribe & Nurture",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 1120,
+        "height": 220,
+        "content": "## Subscribe & Nurture\nLead lands on your Listmonk list, then gets a personal follow-up three days later."
+      }
+    },
+    {
+      "id": "sticky-crypto",
+      "name": "Warning: crypto module",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -130,
+        370
+      ],
+      "parameters": {
+        "color": 3,
+        "width": 260,
+        "height": 160,
+        "content": "## Node setting required\nThis Code node needs `require('crypto')`. Self-hosted n8n: set `NODE_FUNCTION_ALLOW_BUILTIN=crypto` in the n8n environment, then restart."
+      }
+    },
+    {
+      "id": "webhook-1",
+      "name": "Sellf Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -700,
+        400
+      ],
+      "parameters": {
+        "path": "sellf-lead-nurture",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "notes": "Paste this node's Production URL into Sellf admin -> Settings -> Webhooks -> Add endpoint.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "config-1",
+      "name": "Configuration (EDIT ME)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -400,
+        400
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "webhookSecret",
+              "value": "paste-the-endpoint-signing-secret",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "listmonkUrl",
+              "value": "https://your-listmonk.example.com",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "listmonkUser",
+              "value": "api-user-name",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "listmonkToken",
+              "value": "paste-the-api-user-token",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "listmonkListId",
+              "value": 1,
+              "type": "number"
+            },
+            {
+              "id": "a6",
+              "name": "fromEmail",
+              "value": "you@your-brand.example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {
+          "stripBinary": false
+        }
+      },
+      "notes": "webhookSecret from Sellf admin -> Settings -> Webhooks. listmonk* = an API user + list id from your Listmonk."
+    },
+    {
+      "id": "verify-1",
+      "name": "Verify Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst config = $('Configuration (EDIT ME)').first().json;\nconst item = $input.first();\n\nconst header = (item.json.headers && item.json.headers['x-sellf-signature']) || '';\nconst rawBody = item.binary && item.binary.data\n  ? Buffer.from(item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify(item.json.body || {});\n\n// Header format (Stripe/Svix style): t=<unix>,v1=<hex>[,v1=<hex2 during secret rotation>]\nlet t = null;\nconst sigs = [];\nfor (const part of header.split(',')) {\n  const eq = part.indexOf('=');\n  if (eq === -1) continue;\n  const key = part.slice(0, eq).trim();\n  const value = part.slice(eq + 1).trim();\n  if (key === 't') t = value;\n  else if (key === 'v1') sigs.push(value);\n}\n\nlet valid = false;\nif (t && sigs.length && config.webhookSecret) {\n  const expected = crypto.createHmac('sha256', config.webhookSecret).update(`${t}.${rawBody}`).digest('hex');\n  const withinTolerance = Math.abs(Math.floor(Date.now() / 1000) - Number(t)) <= 300;\n  valid = withinTolerance && sigs.some((v1) =>\n    v1.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)));\n}\n\nreturn [{ json: { valid, body: JSON.parse(rawBody) } }];"
+      }
+    },
+    {
+      "id": "if-valid",
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-401",
+      "name": "Respond Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        560
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"success\":false,\"error\":\"invalid signature\"}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        400
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"ok\"}"
+      },
+      "notes": "Acknowledge before processing - Sellf retries deliveries that don't get a 2xx."
+    },
+    {
+      "id": "switch-1",
+      "name": "Is Lead Captured?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        800,
+        400
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "lead.captured",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "lead.captured"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "notes": "Only lead.captured flows through - other events (and Sellf's test deliveries) are dropped."
+    },
+    {
+      "id": "code-1",
+      "name": "Extract Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst d = body.data;\n\nconst email = (d.customer && d.customer.email) || d.email;\nif (!email) throw new Error('lead.captured payload has no email');\nconst firstName = (d.customer && d.customer.firstName) || '';\n\nreturn [{ json: {\n  email,\n  firstName,\n  name: d.customer ? [d.customer.firstName, d.customer.lastName].filter(Boolean).join(' ') : '',\n  productName: (d.product && d.product.name) || '',\n  productId: (d.product && d.product.id) || '',\n} }];"
+      }
+    },
+    {
+      "id": "listmonk-1",
+      "name": "Add to Listmonk",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Configuration (EDIT ME)').item.json.listmonkUrl }}/api/subscribers",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'token ' + $('Configuration (EDIT ME)').item.json.listmonkUser + ':' + $('Configuration (EDIT ME)').item.json.listmonkToken }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ email: $json.email, name: $json.name || '', status: 'enabled', lists: [Number($('Configuration (EDIT ME)').item.json.listmonkListId)], preconfirm_subscriptions: false, attribs: { source: 'sellf-lead', product: $json.productName, product_id: $json.productId } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "notes": "statusCode 200 = subscribed, 409 = already on the list (safe to ignore)."
+    },
+    {
+      "id": "wait-1",
+      "name": "Wait 3 Days",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1700,
+        400
+      ],
+      "parameters": {
+        "amount": 3,
+        "unit": "days"
+      },
+      "notes": "n8n parks the execution - it survives restarts. Adjust to your nurture rhythm."
+    },
+    {
+      "id": "email-1",
+      "name": "Send Follow-up Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2000,
+        400
+      ],
+      "parameters": {
+        "fromEmail": "={{ $('Configuration (EDIT ME)').item.json.fromEmail }}",
+        "toEmail": "={{ $('Extract Lead').item.json.email }}",
+        "subject": "={{ 'How is ' + ($('Extract Lead').item.json.productName || 'the freebie') + ' working for you?' }}",
+        "text": "={{ 'Hi ' + ($('Extract Lead').item.json.firstName || 'there') + ',\\n\\nA few days ago you grabbed ' + ($('Extract Lead').item.json.productName || 'one of my free resources') + ' - I hope it is already useful.\\n\\nIf anything is unclear, just hit reply. And if you want to go deeper, check what else I have for you.\\n\\nTalk soon!' }}",
+        "options": {}
+      },
+      "notes": "Connect SMTP credentials and make this email yours - the default copy is a starting point."
+    }
+  ],
+  "connections": {
+    "Sellf Webhook": {
+      "main": [
+        [
+          {
+            "node": "Configuration (EDIT ME)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration (EDIT ME)": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature": {
+      "main": [
+        [
+          {
+            "node": "Signature Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature Valid?": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond OK": {
+      "main": [
+        [
+          {
+            "node": "Is Lead Captured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Lead Captured?": {
+      "main": [
+        [
+          {
+            "node": "Extract Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Lead": {
+      "main": [
+        [
+          {
+            "node": "Add to Listmonk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Add to Listmonk": {
+      "main": [
+        [
+          {
+            "node": "Wait 3 Days",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 3 Days": {
+      "main": [
+        [
+          {
+            "node": "Send Follow-up Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "sellf"
+  }
+}

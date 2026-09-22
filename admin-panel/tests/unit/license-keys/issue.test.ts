@@ -1,0 +1,194 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@/lib/license/resolve', () => ({
+  checkFeature: vi.fn().mockResolvedValue(true),
+}));
+
+vi.mock('@/lib/license-keys/keys', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/license-keys/keys')>('@/lib/license-keys/keys');
+  return { ...actual, loadActiveSellerKey: vi.fn() };
+});
+
+import { loadActiveSellerKey, generateSellerKeypair } from '@/lib/license-keys/keys';
+import { verifyLicense } from '@/lib/license-keys/format';
+import { issueLicense } from '@/lib/license-keys/issue';
+
+const SELLER = '33333333-3333-4333-8333-333333333333';
+const PRODUCT = '11111111-1111-4111-8111-111111111111';
+const NOW = new Date(1_000_000 * 1000);
+const key = generateSellerKeypair();
+
+interface ProductRow {
+  seller_id: string;
+  slug: string;
+  issue_license_on_purchase: boolean;
+  license_tier: string | null;
+  license_duration_days: number | null;
+  custom_checkout_fields: unknown[];
+}
+
+type LicenseRow = { id?: string; license_key: string; kid: string; seller_id: string };
+
+function adminMock(opts: {
+  product?: ProductRow | null;
+  existing?: LicenseRow | null;
+  insert?: ReturnType<typeof vi.fn>;
+  raceWinner?: LicenseRow | null;
+}) {
+  const insert = opts.insert ?? vi.fn().mockResolvedValue({ error: null });
+  // raceWinner: returned by the second maybeSingle on issued_licenses (post-insert re-query)
+  let licenseQueryCount = 0;
+  const from = vi.fn((table: string) => {
+    if (table === 'products') {
+      const c = { select: () => c, eq: () => c, maybeSingle: () => Promise.resolve({ data: opts.product ?? null, error: null }) };
+      return c;
+    }
+    const c = {
+      select: () => c,
+      eq: () => c,
+      maybeSingle: () => {
+        const n = ++licenseQueryCount;
+        const data = n === 1 ? (opts.existing ?? null) : (opts.raceWinner ?? opts.existing ?? null);
+        return Promise.resolve({ data, error: null });
+      },
+      insert,
+    };
+    return c;
+  });
+  return { from };
+}
+
+const product = (over: Partial<ProductRow> = {}): ProductRow => ({
+  seller_id: SELLER, slug: 'pro-kit', issue_license_on_purchase: true, license_tier: 'pro', license_duration_days: null, custom_checkout_fields: [], ...over,
+});
+
+const call = (admin: unknown, customFieldValues?: Record<string, string>) =>
+  issueLicense(admin as never, { productId: PRODUCT, email: 'a@b.co', userId: null, orderId: 'ord_1', customFieldValues }, { now: NOW });
+
+beforeEach(() => {
+  vi.mocked(loadActiveSellerKey).mockReset();
+  vi.mocked(loadActiveSellerKey).mockResolvedValue({ kid: key.kid, publicKeyPem: key.publicKeyPem, privateKeyPem: key.privateKeyPem });
+});
+
+describe('issueLicense', () => {
+  it('returns null when the product does not have issuance enabled', async () => {
+    expect(await call(adminMock({ product: product({ issue_license_on_purchase: false }) }))).toBeNull();
+    expect(vi.mocked(loadActiveSellerKey)).not.toHaveBeenCalled();
+  });
+
+  it('returns null when the product is unknown', async () => {
+    expect(await call(adminMock({ product: null }))).toBeNull();
+  });
+
+  it('returns null and warns when seller_id is null (backfill not run)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const result = await call(adminMock({ product: product({ seller_id: null as unknown as string }) }));
+    expect(result).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('seller_id is null'));
+    expect(vi.mocked(loadActiveSellerKey)).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('returns null when the seller has no active key', async () => {
+    vi.mocked(loadActiveSellerKey).mockResolvedValue(null);
+    expect(await call(adminMock({ product: product() }))).toBeNull();
+  });
+
+  it('issues a perpetual license whose claims verify under the seller key', async () => {
+    const insert = vi.fn().mockResolvedValue({ error: null });
+    const result = await call(adminMock({ product: product(), insert }));
+    expect(result).toBeTruthy();
+    const r = verifyLicense(result!.token, key.publicKeyPem, { now: NOW });
+    expect(r).toMatchObject({ valid: true, claims: { product: 'pro-kit', email: 'a@b.co', order: 'ord_1', tier: 'pro', exp: null, kid: key.kid } });
+    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ seller_id: SELLER, order_id: 'ord_1', product_id: PRODUCT, kid: key.kid, license_key: result!.token, expires_at: null }));
+    expect(result).toMatchObject({ kid: key.kid, sellerId: SELLER });
+  });
+
+  it('loads the seller key for the product owner', async () => {
+    await call(adminMock({ product: product() }));
+    expect(vi.mocked(loadActiveSellerKey)).toHaveBeenCalledWith(expect.anything(), SELLER);
+  });
+
+  it('sets exp from license_duration_days', async () => {
+    const result = await call(adminMock({ product: product({ license_duration_days: 30 }) }));
+    const r = verifyLicense(result!.token, key.publicKeyPem, { now: NOW });
+    if (!r.valid) throw new Error('expected valid');
+    expect(r.claims.exp).toBe(Math.floor(NOW.getTime() / 1000) + 30 * 86400);
+  });
+
+  it('emits normalized domain and namespaced custom claims without replacing system claims', async () => {
+    const result = await call(adminMock({
+      product: product({
+        custom_checkout_fields: [
+          { id: '_sellf_license_domain', type: 'domain', label: 'License domain', required: false, max_length: 253 },
+          { id: 'company-name', type: 'text', label: 'Company', required: false, max_length: 100 },
+          { id: 'tier', type: 'text', label: 'Tier note', required: false, max_length: 20 },
+        ],
+      }),
+    }), {
+      _sellf_license_domain: 'https://www.Example.com:443/path',
+      'company-name': ' ACME ',
+      tier: 'business',
+    });
+
+    const r = verifyLicense(result!.token, key.publicKeyPem, { now: NOW });
+    if (!r.valid) throw new Error('expected valid');
+    expect(r.claims).toMatchObject({
+      email: 'a@b.co',
+      tier: 'pro',
+      domain: 'example.com',
+      custom_company_name: 'ACME',
+      custom_tier: 'business',
+    });
+  });
+
+  it('omits an empty optional domain claim', async () => {
+    const result = await call(adminMock({
+      product: product({
+        custom_checkout_fields: [
+          { id: '_sellf_license_domain', type: 'domain', label: 'License domain', required: false, max_length: 253 },
+        ],
+      }),
+    }), {});
+    const r = verifyLicense(result!.token, key.publicKeyPem, { now: NOW });
+    if (!r.valid) throw new Error('expected valid');
+    expect(r.claims).not.toHaveProperty('domain');
+  });
+
+  it('fails closed when paid checkout values contain an unknown field', async () => {
+    await expect(call(adminMock({ product: product() }), { attacker: 'value' }))
+      .rejects.toThrow('Invalid custom field values');
+  });
+
+  it('fails closed when stored custom field definitions are invalid', async () => {
+    await expect(call(adminMock({
+      product: product({
+        custom_checkout_fields: [
+          { id: '_sellf_attacker', type: 'text', label: 'Bad', required: false, max_length: 10 },
+        ],
+      }),
+    }))).rejects.toThrow('Invalid custom field definitions');
+  });
+
+  it('is idempotent — returns the already-issued result without re-inserting', async () => {
+    const insert = vi.fn();
+    const existing = { id: '44444444-4444-4444-8444-444444444444', license_key: 'EXISTING.TOKEN', kid: 'existingkid', seller_id: SELLER };
+    const result = await call(adminMock({ product: product(), existing, insert }));
+    expect(result).toMatchObject({ token: 'EXISTING.TOKEN', kid: 'existingkid', sellerId: SELLER });
+    expect(result?.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('handles concurrent insert race (23505) by re-querying and returning the winner', async () => {
+    const winner: LicenseRow = { id: '55555555-5555-4555-8555-555555555555', license_key: 'RACE.WINNER.TOKEN', kid: 'racekid', seller_id: SELLER };
+    const insert = vi.fn().mockResolvedValue({ error: { code: '23505', message: 'duplicate key value violates unique constraint "issued_licenses_order_id_product_id_key"' } });
+    const result = await call(adminMock({ product: product(), insert, raceWinner: winner }));
+    expect(result).toMatchObject({ token: 'RACE.WINNER.TOKEN', kid: 'racekid', sellerId: SELLER });
+    expect(result?.id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('re-throws on non-23505 insert errors', async () => {
+    const insert = vi.fn().mockResolvedValue({ error: { code: '42501', message: 'permission denied for table issued_licenses' } });
+    await expect(call(adminMock({ product: product(), insert }))).rejects.toThrow('permission denied for table issued_licenses');
+  });
+});

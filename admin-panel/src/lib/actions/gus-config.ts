@@ -1,0 +1,177 @@
+'use server';
+
+import { createClient } from '@/lib/supabase/server';
+import { encryptSecret } from '@/lib/services/secret-encryption';
+import { revalidatePath } from 'next/cache';
+import { isDemoMode, DEMO_MODE_ERROR } from '@/lib/demo-guard';
+import { withAdminAuth } from '@/lib/actions/admin-auth';
+import type { ActionResponse } from '@/lib/actions/admin-auth';
+import { isValidGUSKeyFormat } from '@/lib/validations/gus-key';
+
+export interface GUSConfig {
+  enabled: boolean;
+  hasKey: boolean;
+}
+
+export interface SaveGUSKeyInput {
+  apiKey: string;
+  enabled: boolean;
+}
+
+/**
+ * Saves/updates the GUS BIR API key — encrypted at rest in `integrations_config`
+ * (gus_api_key_encrypted/iv/tag), which is anon-REVOKED. NEVER store it (or any secret)
+ * in shop_config.custom_settings, which is not anon-readable but is a free-form column.
+ */
+export async function saveGUSAPIKey(input: SaveGUSKeyInput): Promise<ActionResponse<void>> {
+  if (isDemoMode()) return { success: false, error: DEMO_MODE_ERROR, errorCode: 'DEMO_MODE' }
+
+  return withAdminAuth(async ({ supabase }) => {
+    // Basic validation
+    const trimmedKey = input.apiKey.trim();
+
+    // If KEEP_EXISTING sentinel, only update enabled status without touching the key
+    if (trimmedKey === 'KEEP_EXISTING') {
+      const { error } = await supabase
+        .from('integrations_config')
+        .update({
+          gus_api_enabled: input.enabled,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', 1);
+
+      if (error) {
+        console.error('[saveGUSAPIKey] Failed to update enabled status:', error);
+        return {
+          success: false,
+          error: 'Failed to update configuration',
+          errorCode: 'DATABASE_ERROR'
+        };
+      }
+
+      revalidatePath('/dashboard/integrations');
+      return { success: true };
+    }
+
+    // Validate new key
+    if (!trimmedKey) {
+      return {
+        success: false,
+        error: 'API key is required',
+        errorCode: 'INVALID_INPUT'
+      };
+    }
+
+    if (!isValidGUSKeyFormat(trimmedKey)) {
+      return {
+        success: false,
+        error: 'Invalid GUS API key format (expected 12–40 alphanumeric characters)',
+        errorCode: 'INVALID_INPUT'
+      };
+    }
+
+    // Encrypt the API key
+    const encrypted = await encryptSecret(trimmedKey);
+
+    // Update integrations_config with encrypted GUS key
+    const { error } = await supabase
+      .from('integrations_config')
+      .update({
+        gus_api_key_encrypted: encrypted.encryptedKey,
+        gus_api_key_iv: encrypted.iv,
+        gus_api_key_tag: encrypted.tag,
+        gus_api_enabled: input.enabled,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', 1); // integrations_config is a singleton table
+
+    if (error) {
+      console.error('[saveGUSAPIKey] Database update error:', error);
+      return {
+        success: false,
+        error: 'Failed to save configuration',
+        errorCode: 'DATABASE_ERROR'
+      };
+    }
+
+    revalidatePath('/dashboard/integrations');
+
+    return { success: true };
+  });
+}
+
+/**
+ * Gets GUS configuration status (without decrypting the key)
+ * Checks both .env and database for key presence
+ */
+export async function getGUSConfig(): Promise<ActionResponse<GUSConfig>> {
+  try {
+    // Check if key is in environment (METHOD 1)
+    const envKey = process.env.GUS_API_KEY;
+    const hasEnvKey = !!(envKey && envKey.trim().length > 0);
+
+    // Check database for encrypted key (METHOD 2)
+    const supabase = await createClient();
+
+    const { data: config } = await supabase
+      .from('integrations_config')
+      .select('gus_api_key_encrypted, gus_api_enabled')
+      .eq('id', 1)
+      .single();
+
+    const hasDatabaseKey = !!(config?.gus_api_key_encrypted);
+    const enabled = config?.gus_api_enabled === true;
+
+    // Key exists if either method has a key
+    const hasKey = hasEnvKey || hasDatabaseKey;
+
+    return {
+      success: true,
+      data: {
+        enabled: hasEnvKey || enabled, // If env key exists, consider it enabled
+        hasKey,
+      }
+    };
+  } catch (error) {
+    console.error('Error fetching GUS config:', error);
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      errorCode: 'UNKNOWN_ERROR'
+    };
+  }
+}
+
+/**
+ * Deletes GUS API key from integrations_config
+ */
+export async function deleteGUSAPIKey(): Promise<ActionResponse<void>> {
+  if (isDemoMode()) return { success: false, error: DEMO_MODE_ERROR, errorCode: 'DEMO_MODE' }
+
+  return withAdminAuth(async ({ supabase }) => {
+    // Clear GUS keys from integrations_config
+    const { error } = await supabase
+      .from('integrations_config')
+      .update({
+        gus_api_key_encrypted: null,
+        gus_api_key_iv: null,
+        gus_api_key_tag: null,
+        gus_api_enabled: false,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', 1);
+
+    if (error) {
+      console.error('Failed to delete GUS API key:', error);
+      return {
+        success: false,
+        error: 'Failed to delete configuration',
+        errorCode: 'DATABASE_ERROR'
+      };
+    }
+
+    revalidatePath('/dashboard/integrations');
+
+    return { success: true };
+  });
+}

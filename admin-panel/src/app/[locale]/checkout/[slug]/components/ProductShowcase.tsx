@@ -1,0 +1,311 @@
+'use client';
+
+import { useMemo } from 'react';
+import { Product } from '@/types';
+import { formatPrice } from '@/lib/constants';
+import Image from 'next/image';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeSanitize from 'rehype-sanitize';
+import { useTranslations } from 'next-intl';
+import { useLocale } from 'next-intl';
+import OmnibusPrice from '@/components/OmnibusPrice';
+import type { TaxMode } from '@/lib/actions/shop-config';
+import { parseVideoUrl } from '@/lib/videoUtils';
+import PlayerstackEmbed from '@/components/player/PlayerstackEmbed';
+import { isPlayerstackPlatform } from '@/lib/playerstack';
+import { formatRecurringProductPrice } from '@/lib/product-pricing-display';
+import { isSalePriceActive, getEffectiveUnitPrice } from '@/lib/services/omnibus';
+import BundleContentsPreview from './BundleContentsPreview';
+import type { BundleComponentSummary } from './BundleContentsPreview';
+import { PANEL_START_CLASSNAME } from '@/lib/two-column-layout';
+
+interface ProductShowcaseProps {
+  product: Product;
+  taxMode?: TaxMode;
+  /** Bundle components when product.is_bundle; renders the "includes" block. */
+  bundleComponents?: BundleComponentSummary[];
+}
+
+export default function ProductShowcase({ product, taxMode, bundleComponents }: ProductShowcaseProps) {
+  const t = useTranslations('checkout');
+  const locale = useLocale();
+  const isSubscription = product.product_type === 'subscription';
+  const recurringPriceDisplay = formatRecurringProductPrice(product, locale);
+
+  // Check if sale price is active (considers both time and quantity limits).
+  // Reuses the shared helpers so display, charge and DB validation agree.
+  const saleQuantitySold = product.sale_quantity_sold ?? 0;
+  const saleQuantityLimit = product.sale_quantity_limit ?? null;
+  const saleQuantityRemaining = saleQuantityLimit !== null ? saleQuantityLimit - saleQuantitySold : null;
+
+  const isSaleActive =
+    !isSubscription &&
+    isSalePriceActive(
+      product.sale_price ?? null,
+      product.sale_price_until ?? null,
+      saleQuantityLimit,
+      saleQuantitySold,
+    );
+
+  // Determine effective price (sale price if active, otherwise regular price)
+  const effectivePrice = isSaleActive ? getEffectiveUnitPrice(product) : product.price;
+
+  // Calculate net price if VAT is included
+  const vatRate = product.vat_rate || 0;
+  const grossPrice = effectivePrice;
+  const netPrice = product.price_includes_vat && vatRate > 0
+    ? grossPrice / (1 + vatRate / 100)
+    : grossPrice;
+  const vatAmount = grossPrice - netPrice;
+
+  const parsedVideo = useMemo(
+    () => product.preview_video_url ? parseVideoUrl(product.preview_video_url) : null,
+    [product.preview_video_url]
+  );
+  const canRenderPreviewVideo = Boolean(
+    product.preview_video_url &&
+    parsedVideo?.isValid &&
+    isPlayerstackPlatform(parsedVideo.platform)
+  );
+
+  return (
+    <div className={PANEL_START_CLASSNAME}>
+      {/* Product Video / Image */}
+      {canRenderPreviewVideo && product.preview_video_url ? (
+        <div className="relative w-full aspect-video mb-6 rounded-2xl overflow-hidden bg-black">
+          <PlayerstackEmbed
+            url={product.preview_video_url}
+            title={product.name}
+            config={product.preview_video_config}
+          />
+        </div>
+      ) : product.image_url ? (
+        <div className="relative w-full aspect-video mb-6 rounded-2xl overflow-hidden bg-sf-raised">
+          <Image
+            src={product.image_url}
+            alt={product.name}
+            fill
+            className="object-cover"
+            priority
+            unoptimized
+          />
+        </div>
+      ) : (
+        /* Placeholder when no image or video */
+        <div className="relative w-full aspect-video mb-6 rounded-2xl overflow-hidden bg-sf-accent-soft flex items-center justify-center border border-sf-border">
+          <span className="text-9xl opacity-50">{product.icon}</span>
+        </div>
+      )}
+
+      {/* Product Header */}
+      <div className="flex items-start justify-between mb-6">
+        <div className="flex-1">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="text-4xl">{product.icon}</span>
+            <h1 className="text-2xl lg:text-3xl font-bold text-sf-heading leading-tight">
+              {product.name}
+            </h1>
+          </div>
+          {product.description && (
+            <p className="text-sf-body text-sm leading-relaxed">
+              {product.description}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Price Display - Hide when Pay What You Want is enabled */}
+      {!product.allow_custom_price && (
+        <div className="mb-8">
+          {/* Strikethrough regular price if on sale */}
+          {isSaleActive && (
+            <div className="text-2xl font-medium text-sf-muted line-through mb-1">
+              {formatPrice(product.price, product.currency)}
+            </div>
+          )}
+
+          <div className="text-5xl font-bold text-sf-heading mb-2 tracking-tight">
+            {recurringPriceDisplay ?? formatPrice(grossPrice, product.currency)}
+          </div>
+
+          {taxMode !== 'stripe_tax' && product.vat_rate != null && product.vat_rate > 0 && (
+            <div className="text-sm text-sf-muted">
+              {t('includingVat', { defaultValue: 'including VAT' })} {vatRate}%
+            </div>
+          )}
+
+          {/* Sale end date */}
+          {isSaleActive && product.sale_price_until && (
+            <div className="text-sm text-sf-warning mt-2 flex items-center gap-1">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              {t('saleEndsAt', {
+                date: new Date(product.sale_price_until).toLocaleString('pl-PL', {
+                  year: 'numeric',
+                  month: 'long',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })
+              })}
+            </div>
+          )}
+
+          {/* Remaining quantity at sale price */}
+          {isSaleActive && saleQuantityRemaining !== null && saleQuantityRemaining > 0 && (
+            <div className="text-sm text-sf-warning mt-2 flex items-center gap-1" data-testid="sale-quantity-remaining">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+              </svg>
+              {t('saleQuantityRemaining', {
+                defaultValue: 'Only {count} left at this price!',
+                count: saleQuantityRemaining
+              })}
+            </div>
+          )}
+
+          {/* EU Omnibus Directive - Lowest price from last 30 days */}
+          {!isSubscription && (
+            <div className="mt-3">
+              <OmnibusPrice
+                productId={product.id}
+                currentPrice={grossPrice}
+                currency={product.currency}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Long Description with Markdown Support */}
+      {product.long_description && (
+        <div className="mb-8 prose dark:prose-invert prose-sm max-w-none">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeSanitize]}
+            components={{
+              // Custom styling for Markdown elements
+              h1: ({ children }) => (
+                <h1 className="text-2xl font-bold text-sf-heading mb-4">{children}</h1>
+              ),
+              h2: ({ children }) => (
+                <h2 className="text-xl font-bold text-sf-heading mb-3 mt-6">{children}</h2>
+              ),
+              h3: ({ children }) => (
+                <h3 className="text-lg font-semibold text-sf-heading mb-2 mt-4">{children}</h3>
+              ),
+              p: ({ children }) => (
+                <p className="text-sf-body leading-relaxed mb-4">{children}</p>
+              ),
+              ul: ({ children }) => (
+                <ul className="list-disc list-inside text-sf-body space-y-2 mb-4">
+                  {children}
+                </ul>
+              ),
+              ol: ({ children }) => (
+                <ol className="list-decimal list-inside text-sf-body space-y-2 mb-4">
+                  {children}
+                </ol>
+              ),
+              li: ({ children }) => (
+                <li className="text-sf-body">{children}</li>
+              ),
+              a: ({ href, children }) => (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sf-accent hover:opacity-80 underline transition-colors"
+                >
+                  {children}
+                </a>
+              ),
+              strong: ({ children }) => (
+                <strong className="font-bold text-sf-heading">{children}</strong>
+              ),
+              em: ({ children }) => (
+                <em className="italic text-sf-body">{children}</em>
+              ),
+              code: ({ children }) => (
+                <code className="px-1.5 py-0.5 bg-sf-raised rounded text-sm text-sf-accent font-mono">
+                  {children}
+                </code>
+              ),
+              pre: ({ children }) => (
+                <pre className="p-4 bg-sf-raised rounded-lg overflow-x-auto mb-4 border border-sf-border">
+                  {children}
+                </pre>
+              ),
+              blockquote: ({ children }) => (
+                <blockquote className="border-l-4 border-sf-border-accent pl-4 italic text-sf-body my-4">
+                  {children}
+                </blockquote>
+              ),
+            }}
+          >
+            {product.long_description}
+          </ReactMarkdown>
+        </div>
+      )}
+
+      {/* Features Sections */}
+      {product.features && product.features.length > 0 && (
+        <div className="space-y-6">
+          {product.features.map((featureSection, sectionIndex) => {
+            // Graceful fallback: skip plain strings (invalid data from before validation was added)
+            if (typeof featureSection === 'string' || !featureSection || typeof featureSection !== 'object') {
+              return null;
+            }
+            const section = featureSection as { title?: string; items?: string[] };
+            if (!section.title || !Array.isArray(section.items)) {
+              return null;
+            }
+            return (
+              <div key={sectionIndex} className="space-y-3">
+                <h3 className="text-xl font-bold text-sf-heading">
+                  {section.title}
+                </h3>
+                <ul className="space-y-2">
+                  {section.items.map((item, itemIndex) => (
+                    <li
+                      key={itemIndex}
+                      className="flex items-start gap-3 text-sf-body"
+                    >
+                      <svg
+                        className="w-5 h-5 text-sf-success flex-shrink-0 mt-0.5"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                      <span>{typeof item === 'string' ? item : String(item)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Bundle contents + adaptive savings (only for bundles with components) */}
+      {bundleComponents && bundleComponents.length > 0 && (
+        <div className="mt-8">
+          <BundleContentsPreview
+            bundlePrice={getEffectiveUnitPrice(product)}
+            currency={product.currency}
+            components={bundleComponents}
+          />
+        </div>
+      )}
+    </div>
+  );
+}

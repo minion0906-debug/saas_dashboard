@@ -1,0 +1,70 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/test-runs/
+
+# runtime data (theme files, etc.)
+/data/
+!/data/.gitkeep
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+
+# stripe configuration (add .stripe to version control if needed)
+.stripe
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# logs
+*.log
+
+# cache
+.cache/
+
+# playwright
+/playwright-report/
+/test-results/
+
+# visual testing screenshots
+/screenshots/
+/screenshots-before/
+/screenshots-after/
+*.bak
+
+# Bun is the source of truth (bun.lock). npm package-lock.json is only a
+# throwaway generated in CI for `npm audit` — never commit it.
+package-lock.json

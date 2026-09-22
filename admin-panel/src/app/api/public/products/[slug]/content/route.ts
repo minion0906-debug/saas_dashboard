@@ -1,0 +1,157 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { checkRateLimit } from '@/lib/rate-limiting';
+import { getShopConfig } from '@/lib/actions/shop-config';
+import { findIssuedLicense, toIssuedLicenseResponse } from '@/lib/license-keys/lookup';
+import { firstRelated } from '@/lib/supabase/relations';
+
+export async function GET(
+  request: NextRequest,
+  context: { params: Promise<{ slug: string }> }
+) {
+  try {
+    const rateLimitOk = await checkRateLimit('public_product_content', 30, 1);
+    if (!rateLimitOk) {
+      return NextResponse.json(
+        { error: 'Too many requests' },
+        { status: 429, headers: { 'Retry-After': '60' } }
+      );
+    }
+
+    const { slug } = await context.params;
+    const supabase = await createClient();
+
+    // Get authenticated user
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+
+    if (authError || !user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Two-step query: fetch product then check access separately.
+    // Step 1: Fetch product by slug
+    const { data: productWithAccess, error: productError } = await supabase
+      .from('products')
+      .select(`
+        id,
+        name,
+        slug,
+        description,
+        icon,
+        price,
+        currency,
+        is_active,
+        is_featured,
+        is_bundle,
+        available_from,
+        available_until,
+        content_config,
+        content_delivery_type
+      `)
+      .eq('slug', slug)
+      .single();
+
+    if (productError || !productWithAccess) {
+      console.error('Error fetching product:', productError);
+      return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+    }
+
+    // Step 2: Check user access separately
+    const { data: userAccessData, error: accessError } = await supabase
+      .from('user_product_access')
+      .select('access_expires_at, access_duration_days, created_at')
+      .eq('product_id', productWithAccess.id)
+      .eq('user_id', user.id)
+      .single();
+
+    if (accessError || !userAccessData) {
+      return NextResponse.json({ error: 'Access denied' }, { status: 403 });
+    }
+
+    // Additional security check: verify access hasn't expired
+    const userAccess = userAccessData;
+    const now = new Date();
+    const expiresAt = userAccess.access_expires_at ? new Date(userAccess.access_expires_at) : null;
+    const isExpired = expiresAt && expiresAt < now;
+
+    if (isExpired) {
+      return NextResponse.json({ error: 'Access expired' }, { status: 403 });
+    }
+
+    // For products marked as inactive, deny access completely
+    // Note: We don't check temporal availability here because users who already 
+    // have access should be able to access content even if the product is no longer 
+    // available for new purchases
+    if (!productWithAccess.is_active) {
+      return NextResponse.json({ error: 'Product not available' }, { status: 403 });
+    }
+
+    // Fetch shop name for the footer
+    const shopConfig = await getShopConfig();
+    const shopName = shopConfig?.shop_name ?? null;
+
+    // Fetch license for this product if one was issued to this user.
+    // issued_licenses is service-role only — must use admin client.
+    const admin = createAdminClient();
+    const license = toIssuedLicenseResponse(await findIssuedLicense(admin, productWithAccess.id, user));
+
+    // For bundles, resolve the component products so the access view can link to
+    // each owned component (the buyer has access to all of them). Non-bundles
+    // return [] so the access view renders unchanged. Uses the FK-hinted
+    // relationship name because bundle_items references products twice.
+    let bundleComponents: Array<{ name: string; icon: string; slug: string }> = [];
+    if (productWithAccess.is_bundle) {
+      const { data: items, error: bundleError } = await admin
+        .from('bundle_items')
+        .select('display_order, component:products!bundle_items_component_product_id_fkey(name,icon,slug)')
+        .eq('bundle_product_id', productWithAccess.id)
+        .order('display_order');
+
+      if (bundleError) {
+        console.error('[product-content] Failed to load bundle components:', bundleError);
+      } else {
+        bundleComponents = (items ?? [])
+          .map((i) => firstRelated<{ name: string; icon: string; slug: string }>(i.component))
+          .filter((c): c is { name: string; icon: string; slug: string } => c != null);
+      }
+    }
+
+    // Return secure product data with computed access status
+    return NextResponse.json({
+      product: {
+        id: productWithAccess.id,
+        name: productWithAccess.name,
+        slug: productWithAccess.slug,
+        description: productWithAccess.description,
+        icon: productWithAccess.icon,
+        price: productWithAccess.price,
+        currency: productWithAccess.currency,
+        is_active: productWithAccess.is_active,
+        is_featured: productWithAccess.is_featured,
+        available_from: productWithAccess.available_from,
+        available_until: productWithAccess.available_until,
+        content_config: productWithAccess.content_config,
+        content_delivery_type: productWithAccess.content_delivery_type
+      },
+      branding: {
+        shop_name: shopName,
+      },
+      license,
+      bundleComponents,
+      userAccess: {
+        access_expires_at: userAccess.access_expires_at,
+        access_duration_days: userAccess.access_duration_days,
+        access_granted_at: userAccess.created_at,
+        // Backend-computed status
+        is_expired: isExpired,
+        is_expiring_soon: expiresAt ? Math.ceil((expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)) <= 7 : false,
+        days_until_expiration: expiresAt ? Math.ceil((expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)) : null
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching product content:', error);
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}

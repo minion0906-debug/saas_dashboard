@@ -1,0 +1,256 @@
+import { Page } from '@playwright/test';
+import { createClient } from '@supabase/supabase-js';
+import { acceptAllCookies } from './consent';
+
+// Supabase config - require explicit env vars, fallback only to local Supabase CLI defaults
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || 'http://127.0.0.1:54321';
+
+// Require an explicit environment-provided key for service-role operations.
+// Hardcoded local Supabase service-role values are not safe to keep in the repo.
+const LOCAL_ANON_KEY = 'sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH';
+
+// Only allow local demo keys when using local Supabase (127.0.0.1) in dev/test
+const isLocalDev = (process.env.NODE_ENV === 'test' || process.env.NODE_ENV === 'development')
+  && SUPABASE_URL.includes('127.0.0.1');
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || (isLocalDev ? '' : '');
+const ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || (isLocalDev ? LOCAL_ANON_KEY : '');
+
+if (!SERVICE_ROLE_KEY) {
+  throw new Error('SUPABASE_SERVICE_ROLE_KEY is required. Set it in .env.local or run local Supabase.');
+}
+if (!ANON_KEY) {
+  throw new Error('NEXT_PUBLIC_SUPABASE_ANON_KEY is required. Set it in .env.local or run local Supabase.');
+}
+
+export const supabaseAdmin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+
+export async function createTestUser(prefix: string = 'test-user') {
+  const randomStr = Math.random().toString(36).substring(7);
+  const email = `${prefix}-${Date.now()}-${randomStr}@example.com`;
+  const password = 'password123';
+
+  const { data: { user }, error } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (error || !user) throw error ?? new Error('Test user was not created');
+
+  return {
+    userId: user.id,
+    email,
+    password,
+    cleanup: async () => {
+      await supabaseAdmin.auth.admin.deleteUser(user.id);
+    },
+  };
+}
+
+/**
+ * Creates a test admin user
+ * @param prefix - Prefix for the email address
+ * @returns Object with email and cleanup function
+ */
+export async function createTestAdmin(prefix: string = 'test-admin') {
+  const testUser = await createTestUser(prefix);
+
+  await supabaseAdmin
+    .from('admin_users')
+    .insert({ user_id: testUser.userId });
+
+  const cleanup = async () => {
+    await supabaseAdmin.from('admin_users').delete().eq('user_id', testUser.userId);
+    await testUser.cleanup();
+  };
+
+  return { email: testUser.email, password: testUser.password, cleanup };
+}
+
+/**
+ * Sets Supabase auth session cookies on a Playwright page context.
+ * Signs in server-side and injects cookies in @supabase/ssr format.
+ * No CDN dependency — works fully offline.
+ *
+ * @param page - Playwright page
+ * @param email - User email
+ * @param password - User password
+ */
+export async function setAuthSession(page: Page, email: string, password: string) {
+  const signInClient = createClient(SUPABASE_URL, ANON_KEY);
+  const { data: { session }, error: signInError } = await signInClient.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (signInError || !session) {
+    throw new Error(`Failed to sign in: ${signInError?.message || 'no session'}`);
+  }
+
+  const supabaseHostname = new URL(SUPABASE_URL).hostname;
+  const cookieKey = `sb-${supabaseHostname.split('.')[0]}-auth-token`;
+
+  // Clear any stale Supabase auth cookies (including chunked variants from prior
+  // magic-link navigations) before injecting the fresh session. If chunked cookies
+  // from a previous test's magic-link flow are left in place alongside the new
+  // non-chunked cookie, @supabase/ssr may assemble the wrong session on the server.
+  const existingCookies = await page.context().cookies();
+  const staleAuthCookies = existingCookies.filter(c =>
+    c.name === cookieKey || c.name.startsWith(`${cookieKey}.`)
+  );
+  if (staleAuthCookies.length > 0) {
+    await page.context().clearCookies({ name: new RegExp(`^${cookieKey}(\\.[0-9]+)?$`) });
+  }
+  const sessionJson = JSON.stringify(session);
+  const base64Value = Buffer.from(sessionJson).toString('base64url');
+  const cookieValue = `base64-${base64Value}`;
+
+  const baseUrl = new URL(process.env.PLAYWRIGHT_BASE_URL || 'http://localhost:3777');
+
+  const CHUNK_SIZE = 3180;
+  if (cookieValue.length <= CHUNK_SIZE) {
+    await page.context().addCookies([{
+      name: cookieKey,
+      value: cookieValue,
+      domain: baseUrl.hostname,
+      path: '/',
+    }]);
+  } else {
+    const chunks: string[] = [];
+    for (let i = 0; i < cookieValue.length; i += CHUNK_SIZE) {
+      chunks.push(cookieValue.substring(i, i + CHUNK_SIZE));
+    }
+    await page.context().addCookies(chunks.map((chunk, idx) => ({
+      name: `${cookieKey}.${idx}`,
+      value: chunk,
+      domain: baseUrl.hostname,
+      path: '/',
+    })));
+  }
+}
+
+/**
+ * Logs in as admin user
+ * @param page - Playwright page
+ * @param email - Admin email
+ * @param password - Admin password
+ */
+export async function loginAsAdmin(page: Page, email: string, password: string) {
+  await acceptAllCookies(page);
+
+  // Hide cookieconsent banner
+  await page.addInitScript(() => {
+    const addStyle = () => {
+      if (document.head) {
+        const style = document.createElement('style');
+        style.innerHTML = '#cc-main { display: none !important; }';
+        document.head.appendChild(style);
+      } else {
+        setTimeout(addStyle, 10);
+      }
+    };
+    addStyle();
+  });
+
+  await setAuthSession(page, email, password);
+
+  await page.goto('/pl/dashboard');
+  // Wait for dashboard to load - look for sidebar navigation
+  await page.waitForSelector('nav, [role="navigation"], aside', { timeout: 15000 });
+}
+
+/**
+ * Get admin auth cookie header for API requests that require cookie-based auth.
+ *
+ * The v1 API endpoints use @supabase/ssr cookie-based auth. This function
+ * creates a test admin, signs in, and returns the Cookie header value
+ * in the format that @supabase/ssr expects (base64url-encoded session).
+ *
+ * @returns Cookie header string for use with Playwright request context
+ */
+export async function getAdminAuthCookie(): Promise<string> {
+  const randomStr = Math.random().toString(36).substring(7);
+  const email = `api-admin-${Date.now()}-${randomStr}@example.com`;
+  const password = 'password123';
+
+  const { data: { user }, error: createError } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (createError) throw createError;
+
+  await supabaseAdmin
+    .from('admin_users')
+    .insert({ user_id: user!.id });
+
+  const signInClient = createClient(SUPABASE_URL, ANON_KEY);
+  const { data: { session }, error: signInError } = await signInClient.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (signInError || !session) {
+    throw new Error('Failed to sign in admin user');
+  }
+
+  // Construct the cookie in @supabase/ssr format:
+  // Cookie name: sb-{hostname.split('.')[0]}-auth-token (per @supabase/supabase-js)
+  // Value: "base64-" + base64url-encoded JSON of the session
+  const supabaseHostname = new URL(SUPABASE_URL).hostname;
+  const cookieKey = `sb-${supabaseHostname.split('.')[0]}-auth-token`;
+  const sessionJson = JSON.stringify(session);
+  const base64Value = Buffer.from(sessionJson).toString('base64url');
+  const cookieValue = `base64-${base64Value}`;
+
+  // Supabase SSR chunks cookies at ~3180 chars. If under that limit, single cookie.
+  const CHUNK_SIZE = 3180;
+  if (cookieValue.length <= CHUNK_SIZE) {
+    return `${cookieKey}=${cookieValue}`;
+  }
+
+  // Chunked format: sb-127-auth-token.0, sb-127-auth-token.1, etc.
+  const chunks: string[] = [];
+  for (let i = 0; i < cookieValue.length; i += CHUNK_SIZE) {
+    chunks.push(cookieValue.substring(i, i + CHUNK_SIZE));
+  }
+  return chunks.map((chunk, i) => `${cookieKey}.${i}=${chunk}`).join('; ');
+}
+
+/**
+ * Get admin bearer token for API requests
+ * Creates a test admin user and returns their JWT token
+ * @returns Bearer token string
+ */
+export async function getAdminBearerToken(): Promise<string> {
+  // Create test admin user
+  const randomStr = Math.random().toString(36).substring(7);
+  const email = `api-admin-${Date.now()}-${randomStr}@example.com`;
+  const password = 'password123';
+
+  const { data: { user }, error: createError } = await supabaseAdmin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (createError) throw createError;
+
+  // Add to admin_users
+  await supabaseAdmin
+    .from('admin_users')
+    .insert({ user_id: user!.id });
+
+  // IMPORTANT: Use a SEPARATE client for sign in to avoid corrupting the shared supabaseAdmin client.
+  // signInWithPassword() changes the client's auth state from service role to user session,
+  // which would cause RLS to be enforced for all subsequent tests using supabaseAdmin.
+  const signInClient = createClient(SUPABASE_URL, ANON_KEY);
+  const { data: { session }, error: signInError } = await signInClient.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (signInError || !session) {
+    throw new Error('Failed to sign in admin user');
+  }
+
+  return session.access_token;
+}

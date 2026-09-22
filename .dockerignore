@@ -1,0 +1,47 @@
+# Dependencies
+**/node_modules
+admin-panel/.next
+
+# Environment files
+.env
+.env.local
+.env*.local
+
+# Testing
+admin-panel/coverage
+admin-panel/test-results
+admin-panel/playwright-report
+admin-panel/screenshots-*
+admin-panel/tests
+
+# IDE & OS
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Git
+.git
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github
+
+# Large unnecessary directories
+templates/
+examples/
+themes/
+layouts/
+bruno/
+docs/
+mcp-server/
+priv/
+release/
+*.tar.gz
+
+# Logs
+*.log

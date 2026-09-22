@@ -1,0 +1,1076 @@
+/**
+ * Payment verification utilities
+ *
+ * SECURITY WARNING: This file contains server-side only code.
+ * Contains Service Role keys and must never be executed in the browser.
+ * Only use in Server Components and API Routes.
+ */
+
+import Stripe from 'stripe';
+import { getStripeServer } from '@/lib/stripe/server';
+import { createAdminClient } from '@/lib/supabase/admin';
+import type { User } from '@supabase/supabase-js';
+import { WebhookService } from '@/lib/services/webhook-service';
+import { buildPurchaseWebhookPayload } from '@/lib/services/webhook-payload';
+import { captureAndPersistOrderTax } from '@/lib/services/tax-snapshot';
+import { resolveComponentProductIds, issueLicensesForOrder } from '@/lib/services/bundle-order';
+import { redactEmail } from '@/lib/logger';
+
+type AdminClient = ReturnType<typeof createAdminClient>;
+
+/** Shape returned by process_stripe_payment_completion_with_bump RPC (JSONB) */
+interface PaymentRpcResult {
+  success: boolean;
+  error?: string;
+  access_granted?: boolean;
+  already_had_access?: boolean;
+  requires_login?: boolean;
+  is_guest_purchase?: boolean;
+  scenario?: string;
+  access_expires_at?: string | null;
+  send_magic_link?: boolean;
+  customer_email?: string;
+}
+
+/**
+ * Helper function to update user profile with customer data from payment
+ *
+ * ALWAYS updates (for logged-in users):
+ * - Customer name: first_name, last_name, full_name
+ *
+ * ONLY if invoice requested (needs_invoice='true'):
+ * - Company data: tax_id, company_name, address, city, zip_code, country
+ *
+ * Note: For guest purchases, data is migrated on registration via
+ * migrate_guest_payment_data_to_profile() database function.
+ */
+async function updateProfileWithCompanyData(
+  serviceClient: AdminClient,
+  userId: string,
+  metadata: Record<string, string | undefined>
+): Promise<void> {
+  try {
+    const updateData: Record<string, string> = {
+      updated_at: new Date().toISOString()
+    };
+
+    // ALWAYS save customer name (from ANY payment, even without invoice)
+    if (metadata.first_name) updateData.first_name = metadata.first_name;
+    if (metadata.last_name) updateData.last_name = metadata.last_name;
+    if (metadata.full_name) updateData.full_name = metadata.full_name;
+
+    // Save company data ONLY if invoice was requested
+    if (metadata.needs_invoice === 'true') {
+      if (metadata.nip) updateData.tax_id = metadata.nip;
+      if (metadata.company_name) updateData.company_name = metadata.company_name;
+      if (metadata.address) updateData.address_line1 = metadata.address;
+      if (metadata.city) updateData.city = metadata.city;
+      if (metadata.postal_code) updateData.zip_code = metadata.postal_code;
+      if (metadata.country) updateData.country = metadata.country;
+    }
+
+    // Only update if we have data to save
+    if (Object.keys(updateData).length > 1) { // > 1 because updated_at is always present
+      const { error } = await serviceClient
+        .from('profiles')
+        .upsert({
+          id: userId,
+          ...updateData
+        });
+
+      if (error) {
+        console.error('Failed to update profile with customer data:', error);
+      }
+    }
+  } catch (error) {
+    console.error('Error updating profile with customer data:', error);
+  }
+}
+
+export interface OtoInfo {
+  has_oto: boolean;
+  // Upsell branch (legacy field names preserved; `upsell_code` is the
+  // forward-symmetric alias and points at the same string as `coupon_code`).
+  coupon_code?: string;
+  coupon_id?: string;
+  upsell_code?: string;
+  upsell_coupon_id?: string;
+  oto_product_id?: string;
+  oto_product_slug?: string;
+  oto_product_name?: string;
+  oto_product_price?: number;
+  oto_product_currency?: string;
+  discount_type?: 'percentage' | 'fixed';
+  discount_value?: number;
+  expires_at?: string;
+  duration_minutes?: number;
+  // Downsell branch (populated only when oto_offers.downsell_product_id is set).
+  // Pre-minted on the same RPC call as the upsell coupon so the OTO checkout
+  // template can build the "Nie, dziękuję" URL without a second round-trip.
+  downsell_code?: string;
+  downsell_coupon_id?: string;
+  downsell_product_id?: string;
+  downsell_product_slug?: string;
+  downsell_product_name?: string;
+  downsell_product_price?: number;
+  downsell_product_currency?: string;
+  downsell_discount_type?: 'percentage' | 'fixed';
+  downsell_discount_value?: number;
+  downsell_expires_at?: string;
+  downsell_duration_minutes?: number;
+  // Fields for skipped OTO (e.g., user already owns the product)
+  reason?: string;
+  skipped_oto_product_id?: string;
+  skipped_oto_product_slug?: string;
+}
+
+export interface PaymentIntentVerificationResult {
+  payment_intent_id: string;
+  status: string;
+  customer_email?: string;
+  amount?: number;
+  currency?: string;
+  metadata?: Record<string, unknown>;
+  created?: number;
+  access_granted?: boolean;
+  requires_login?: boolean;
+  is_guest_purchase?: boolean;
+  scenario?: string;
+  send_magic_link?: boolean;
+  oto_info?: OtoInfo;
+  error?: string;
+}
+
+export interface PaymentVerificationResult {
+  session_id: string;
+  status: string;
+  payment_status: string | null;
+  customer_email?: string;
+  amount_total?: number;
+  currency?: string;
+  metadata?: Record<string, unknown>;
+  created?: number;
+  expires_at?: number;
+  access_granted?: boolean;
+  already_had_access?: boolean;
+  requires_login?: boolean;
+  is_guest_purchase?: boolean;
+  scenario?: string;
+  access_expires_at?: string | null;
+  send_magic_link?: boolean;
+  oto_info?: OtoInfo;
+  error?: string;
+}
+
+/**
+ * Check if payment was already processed and return cached result from database.
+ * This avoids unnecessary Stripe API calls for already-processed payments.
+ * Returns null if payment not found in database (needs Stripe verification).
+ */
+export type PaymentStatusKind =
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'expired'
+  | 'magic_link_sent'
+  | 'email_validation_failed';
+
+interface VerifiedPaymentShape {
+  access_granted?: boolean;
+  scenario?: string;
+  is_guest_purchase?: boolean;
+  send_magic_link?: boolean;
+  requires_login?: boolean;
+  error?: string;
+}
+
+interface MappedPaymentStatus {
+  paymentStatus: PaymentStatusKind;
+  accessGranted: boolean;
+  errorMessage: string;
+}
+
+/**
+ * Translates the success-shape of a verified payment result into the user-facing
+ * status the payment-status page renders. Centralized here so both the Stripe
+ * session and PaymentIntent branches share one source of truth and regressions
+ * in the contract are caught by unit tests.
+ */
+export function mapVerifiedPaymentToStatus(result: VerifiedPaymentShape): MappedPaymentStatus {
+  if (result.access_granted) {
+    const requiresMagicLink = !!(result.requires_login && result.send_magic_link);
+    return {
+      paymentStatus: requiresMagicLink ? 'magic_link_sent' : 'completed',
+      accessGranted: true,
+      errorMessage: '',
+    };
+  }
+
+  if (result.scenario === 'email_validation_failed_server_side') {
+    return {
+      paymentStatus: 'email_validation_failed',
+      accessGranted: false,
+      errorMessage: result.error || 'Invalid email address detected.',
+    };
+  }
+
+  if (result.is_guest_purchase && result.send_magic_link) {
+    return { paymentStatus: 'magic_link_sent', accessGranted: false, errorMessage: '' };
+  }
+
+  return {
+    paymentStatus: 'failed',
+    accessGranted: false,
+    errorMessage: result.error || 'Unknown error occurred',
+  };
+}
+
+interface CachedPaymentAuthInput {
+  visitor: { id: string; email: string | null } | null;
+  transactionUserId: string | null;
+  transactionEmail: string | null;
+  hasAccess: boolean;
+}
+
+interface CachedPaymentAuthOutput {
+  isStructuralGuestPurchase: boolean;
+  isClaimedByCurrentUser: boolean;
+  currentVisitorNeedsLogin: boolean;
+}
+
+export function classifyCachedPaymentAuth({
+  visitor,
+  transactionUserId,
+  transactionEmail,
+  hasAccess,
+}: CachedPaymentAuthInput): CachedPaymentAuthOutput {
+  const isClaimedByCurrentUser = !!visitor
+    && hasAccess
+    && !!transactionEmail
+    && !!visitor.email
+    && transactionEmail.toLowerCase() === visitor.email.toLowerCase();
+
+  const isStructuralGuestPurchase = !transactionUserId;
+  const currentVisitorNeedsLogin = !isClaimedByCurrentUser;
+
+  return {
+    isStructuralGuestPurchase,
+    isClaimedByCurrentUser,
+    currentVisitorNeedsLogin,
+  };
+}
+
+async function getProcessedPaymentFromDatabase(
+  sessionId: string,
+  serviceClient: AdminClient,
+  user?: User | null
+): Promise<PaymentVerificationResult | null> {
+  // Look up existing completed transaction
+  const { data: transaction, error } = await serviceClient
+    .from('payment_transactions')
+    .select(`
+      id,
+      session_id,
+      product_id,
+      customer_email,
+      user_id,
+      amount,
+      currency,
+      status,
+      created_at,
+      products:product_id (
+        id,
+        slug,
+        name,
+        success_redirect_url
+      )
+    `)
+    .eq('session_id', sessionId)
+    .eq('status', 'completed')
+    .maybeSingle();
+
+  if (error || !transaction) {
+    return null; // Not in database, need to verify with Stripe
+  }
+
+  if (user && transaction.user_id && transaction.user_id !== user.id) {
+    return {
+      session_id: sessionId,
+      status: 'complete',
+      payment_status: 'paid',
+      error: 'Session does not belong to current user'
+    };
+  }
+
+  if (user && !transaction.user_id && transaction.customer_email &&
+      user.email && transaction.customer_email.toLowerCase() !== user.email.toLowerCase()) {
+    return {
+      session_id: sessionId,
+      status: 'complete',
+      payment_status: 'paid',
+      error: 'Session does not belong to current user'
+    };
+  }
+
+  // Check if user has access to the product
+  const effectiveUserId = transaction.user_id || user?.id;
+  const { data: accessRecord } = effectiveUserId
+    ? await serviceClient
+        .from('user_product_access')
+        .select('id, access_expires_at')
+        .eq('product_id', transaction.product_id)
+        .eq('user_id', effectiveUserId)
+        .maybeSingle()
+    : { data: null };
+
+  const hasAccess = !!accessRecord;
+  const { isStructuralGuestPurchase, isClaimedByCurrentUser, currentVisitorNeedsLogin } =
+    classifyCachedPaymentAuth({
+      visitor: user ? { id: user.id, email: user.email || null } : null,
+      transactionUserId: transaction.user_id,
+      transactionEmail: transaction.customer_email,
+      hasAccess,
+    });
+
+  // Generate OTO info if applicable
+  let otoInfo: OtoInfo = { has_oto: false };
+  try {
+    const { data: otoResultRaw } = await serviceClient
+      .rpc('generate_oto_coupon', {
+        source_product_id_param: transaction.product_id,
+        customer_email_param: transaction.customer_email,
+        transaction_id_param: transaction.id
+      });
+    const otoResult = otoResultRaw as OtoInfo | null;
+
+    if (otoResult?.has_oto || otoResult?.reason) {
+      otoInfo = otoResult;
+    }
+  } catch (otoErr) {
+    console.error('OTO generation exception (cached):', otoErr);
+  }
+
+  return {
+    session_id: sessionId,
+    status: 'complete',
+    payment_status: 'paid',
+    customer_email: transaction.customer_email,
+    amount_total: transaction.amount, // Already in cents (DB stores cents, same as Stripe amount_total)
+    currency: transaction.currency,
+    metadata: {
+      product_id: transaction.product_id
+    },
+    created: Math.floor(new Date(transaction.created_at).getTime() / 1000),
+    access_granted: hasAccess,
+    already_had_access: false, // Can't determine from cache
+    requires_login: currentVisitorNeedsLogin,
+    is_guest_purchase: isStructuralGuestPurchase,
+    scenario: isClaimedByCurrentUser
+      ? 'logged_in_purchase_cached'
+      : (isStructuralGuestPurchase ? 'guest_purchase_cached' : 'existing_user_guest_checkout_cached'),
+    access_expires_at: accessRecord?.access_expires_at || null,
+    send_magic_link: currentVisitorNeedsLogin,
+    oto_info: otoInfo
+  };
+}
+
+export async function verifyPaymentSession(
+  sessionId: string,
+  user?: User | null
+): Promise<PaymentVerificationResult> {
+  // SECURITY: This function must only run on the server
+  if (typeof window !== 'undefined') {
+    throw new Error('verifyPaymentSession can only be called on the server');
+  }
+
+  // Validate input
+  if (!sessionId || typeof sessionId !== 'string') {
+    return {
+      session_id: sessionId || 'invalid',
+      status: 'error',
+      payment_status: null,
+      error: 'Invalid session ID'
+    };
+  }
+
+  // Default admin client for initial cache check (platform schema)
+  const serviceClient = createAdminClient();
+
+  try {
+    // First, check if payment was already processed (database cache)
+    // This avoids unnecessary Stripe API calls and enables E2E testing
+    const cachedResult = await getProcessedPaymentFromDatabase(sessionId, serviceClient, user);
+    if (cachedResult) {
+      return cachedResult;
+    }
+
+    // Payment not in database - verify with Stripe
+    const stripe = await getStripeServer();
+
+    // Retrieve session from Stripe
+    const session = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ['line_items', 'payment_intent']
+    });
+
+    if (!session) {
+      return {
+        session_id: sessionId,
+        status: 'not_found',
+        payment_status: null,
+        error: 'Session not found'
+      };
+    }
+
+    if (user && session.metadata?.user_id &&
+        session.metadata.user_id !== '' &&
+        session.metadata.user_id !== 'null' &&
+        session.metadata.user_id !== user.id) {
+      return {
+        session_id: session.id,
+        status: session.status || 'unknown',
+        payment_status: session.payment_status,
+        error: 'Session does not belong to current user'
+      };
+    }
+
+    const sessionEmail = session.customer_details?.email?.toLowerCase();
+    const userEmail = user?.email?.toLowerCase();
+    const sessionUserId = session.metadata?.user_id;
+    const sessionHasMatchingUserId = !!sessionUserId && sessionUserId !== '' && sessionUserId !== 'null' && sessionUserId === user?.id;
+    if (user && !sessionHasMatchingUserId && sessionEmail && userEmail && sessionEmail !== userEmail) {
+      return {
+        session_id: session.id,
+        status: session.status || 'unknown',
+        payment_status: session.payment_status,
+        error: 'Session does not belong to current user'
+      };
+    }
+
+    // Base response
+    const baseResponse: PaymentVerificationResult = {
+      session_id: session.id,
+      status: session.status || 'unknown',
+      payment_status: session.payment_status,
+      customer_email: session.customer_details?.email || undefined,
+      amount_total: session.amount_total || undefined,
+      currency: session.currency || undefined,
+      metadata: session.metadata || undefined,
+      created: session.created,
+      expires_at: session.expires_at,
+    };
+
+    // Subscription mode: customer.subscription.* webhooks handle persistence + access.
+    // One-time RPC below would reject trials (amount=0) and paid subs (amount mismatch).
+    if (
+      session.status === 'complete' &&
+      session.payment_status === 'paid' &&
+      session.mode === 'subscription'
+    ) {
+      const metadataUserId = session.metadata?.user_id;
+      const wasLoggedIn = !!user || (!!metadataUserId && metadataUserId !== '' && metadataUserId !== 'null');
+
+      if (wasLoggedIn) {
+        return {
+          ...baseResponse,
+          access_granted: true,
+          scenario: 'subscription',
+        };
+      }
+
+      // Guest subscription: webhook still creates the access record (matched by
+      // email), but the buyer has no session cookie yet — show magic-link UI.
+      return {
+        ...baseResponse,
+        access_granted: false,
+        is_guest_purchase: true,
+        send_magic_link: true,
+        requires_login: true,
+        scenario: 'subscription_guest',
+      };
+    }
+
+    // If payment is complete, delegate to database function
+    if (session.status === 'complete' && session.payment_status === 'paid') {
+      const productId = session.metadata?.product_id;
+      const customerEmail = session.customer_details?.email || session.customer_email;
+      
+      if (productId && customerEmail) {
+        try {
+          // Validate email for disposable domains
+          const { ProductValidationService } = await import('@/lib/services/product-validation');
+          const isValidEmail = await ProductValidationService.validateEmail(customerEmail);
+          if (!isValidEmail) {
+            return {
+              ...baseResponse,
+              access_granted: false,
+              error: 'Invalid email address detected. Temporary email addresses are not allowed for purchases. Please contact support for assistance.',
+              scenario: 'email_validation_failed_server_side'
+            };
+          }
+          
+          // Extract payment intent ID
+          const stripePaymentIntentId = typeof session.payment_intent === 'object'
+            ? session.payment_intent?.id
+            : session.payment_intent;
+
+          // Extract bump product IDs from metadata (multi-bump support)
+          const bumpProductIdsStr = session.metadata?.bump_product_ids || '';
+          const bumpProductId = session.metadata?.bump_product_id || null;
+          const hasBump = session.metadata?.has_bump === 'true';
+          
+          // Parse bump IDs: prefer comma-separated bump_product_ids, fallback to single bump_product_id
+          let bumpProductIds: string[] = bumpProductIdsStr
+            ? bumpProductIdsStr.split(',').filter((id: string) => id.length > 0)
+            : (hasBump && bumpProductId ? [bumpProductId] : []);
+
+          // Detect metadata truncation and recover from Stripe line items
+          const expectedBumpCount = parseInt(session.metadata?.bump_count || '0', 10);
+          if (expectedBumpCount > 0 && bumpProductIds.length < expectedBumpCount) {
+            console.warn('[verify-payment] BUMP_METADATA_TRUNCATED | session=%s | expected=%d | got=%d', session.id, expectedBumpCount, bumpProductIds.length);
+            try {
+              const lineItems = await stripe.checkout.sessions.listLineItems(session.id, {
+                limit: 100,
+                expand: ['data.price.product'],
+              });
+              const recoveredIds: string[] = [];
+              for (const li of lineItems.data) {
+                const product = li.price?.product;
+                if (typeof product === 'object' && product && 'metadata' in product) {
+                  const meta = (product as Stripe.Product).metadata;
+                  if (meta?.is_bump === 'true' && meta?.product_id) {
+                    recoveredIds.push(meta.product_id);
+                  }
+                }
+              }
+              if (recoveredIds.length >= expectedBumpCount) {
+                bumpProductIds = recoveredIds;
+              }
+            } catch (lineItemErr) {
+              console.error('[verify-payment] Failed to recover bump IDs from Stripe:', lineItemErr);
+            }
+          }
+          
+          // Extract coupon ID from metadata if present
+          const couponId = session.metadata?.coupon_id || null;
+          const hasCoupon = session.metadata?.has_coupon === 'true';
+
+          // Use function that supports multiple order bumps (UUID array)
+          const rpcParams = {
+            session_id_param: session.id,
+            product_id_param: productId,
+            customer_email_param: customerEmail,
+            amount_total: session.amount_total || 0,
+            currency_param: session.currency || 'usd',
+            stripe_payment_intent_id: stripePaymentIntentId || undefined,
+            user_id_param: user?.id || undefined,
+            bump_product_ids_param: bumpProductIds.length > 0 ? bumpProductIds : undefined,
+            coupon_id_param: hasCoupon && couponId ? couponId : undefined,
+            // Net subtotal: net-priced products validate the NET amount, not the gross.
+            amount_subtotal_param: session.amount_subtotal ?? undefined
+          };
+          
+          const { data: paymentResultRaw, error: paymentError } = await serviceClient
+            .rpc('process_stripe_payment_completion_with_bump', rpcParams);
+
+          const paymentResult = paymentResultRaw as PaymentRpcResult | null;
+
+          if (paymentError) {
+            console.error(
+              '[verify-payment] PAYMENT_DB_FAILURE | session=%s | product=%s | email=%s | coupon_id=%s | amount=%d cents | error=%s (code=%s)',
+              session.id, productId, redactEmail(customerEmail), couponId ?? 'none',
+              session.amount_total, paymentError.message, paymentError.code
+            );
+            return {
+              ...baseResponse,
+              access_granted: false,
+              error: 'Failed to process payment'
+            };
+          }
+
+          if (!paymentResult?.success) {
+            console.error(
+              '[verify-payment] PAYMENT_DB_REJECTED | session=%s | product=%s | email=%s | coupon_id=%s | amount=%d cents | reason=%s',
+              session.id, productId, redactEmail(customerEmail), couponId ?? 'none',
+              session.amount_total, paymentResult?.error ?? 'unknown'
+            );
+            return {
+              ...baseResponse,
+              access_granted: false,
+              error: paymentResult?.error || 'Payment processing failed'
+            };
+          }
+
+          // Trigger webhook for new successful purchases
+          if (!paymentResult.already_had_access) {
+            const { data: txCustomFields } = await serviceClient
+              .from('payment_transactions')
+              .select('id, custom_field_values')
+              .eq('session_id', session.id)
+              .maybeSingle();
+            const customFieldValues = (txCustomFields?.custom_field_values as Record<string, string> | null) ?? undefined;
+
+            // Resolve bundle components (ordered) — [] for a non-bundle product. A bundle grants
+            // the bundle + every component (DB); we issue a license per licensable product below.
+            // Identical shape to the Stripe-webhook emitter so the winning path is irrelevant.
+            const componentProductIds = await resolveComponentProductIds(serviceClient, productId);
+
+            // Issue licenses — one per licensable product in [productId, ...componentProductIds].
+            // issueLicense is idempotent by (order_id, product_id); prefer the payment-intent id so
+            // the same key backs idempotency across both completion paths.
+            const licenses = await issueLicensesForOrder(serviceClient, {
+              productIds: [productId, ...componentProductIds],
+              email: customerEmail,
+              userId: user?.id || null,
+              orderId: stripePaymentIntentId || session.id,
+              customFieldValues,
+            });
+
+            // VAT tax snapshot — capture Stripe's computed tax per line. Fail-safe:
+            // never blocks access granting or the purchase webhook.
+            const taxSnapshot = await captureAndPersistOrderTax({
+              stripe,
+              supabase: serviceClient,
+              transactionId: txCustomFields?.id,
+              sessionId: session.id,
+            });
+
+            const webhookData = await buildPurchaseWebhookPayload({
+              supabaseClient: serviceClient,
+              customerEmail,
+              userId: user?.id || null,
+              productId,
+              bumpProductIds,
+              componentProductIds,
+              metadata: session.metadata as Record<string, string | undefined> | null,
+              // Embed collects NIP/address via Stripe → carry them to the invoice section.
+              stripeCustomerDetails: session.customer_details,
+              amount: session.amount_total,
+              currency: session.currency,
+              sessionId: session.id,
+              taxSnapshot,
+              paymentIntentId: stripePaymentIntentId,
+              couponId: hasCoupon && couponId ? couponId : null,
+              isGuest: paymentResult?.is_guest_purchase,
+              customFieldValues: customFieldValues ?? null,
+            });
+
+            if (licenses.length) webhookData.licenses = licenses;
+
+            WebhookService.trigger('purchase.completed', webhookData, serviceClient, [productId, ...componentProductIds, ...bumpProductIds])
+              .catch(err => console.error('Webhook trigger error:', err));
+
+            // NOTE: Server-side CAPI tracking for Purchase is handled in the
+            // Stripe webhook handler (webhooks/stripe/route.ts), NOT here.
+            // Both webhook and client-side use deterministic event_id based on
+            // Stripe session ID (generatePurchaseEventId) for Facebook dedup.
+          }
+
+          if (user?.id && session.metadata) {
+            await updateProfileWithCompanyData(
+              serviceClient,
+              user.id,
+              session.metadata as Record<string, string | undefined>
+            );
+          }
+
+          // Generate OTO coupon if configured for this product
+          let otoInfo: OtoInfo = { has_oto: false };
+          if (paymentResult.access_granted || paymentResult.is_guest_purchase) {
+            try {
+              // Get transaction ID from payment_transactions table
+              const { data: transaction } = await serviceClient
+                .from('payment_transactions')
+                .select('id')
+                .eq('session_id', session.id)
+                .single();
+
+              if (transaction?.id) {
+                const { data: otoResultRaw, error: otoError } = await serviceClient
+                  .rpc('generate_oto_coupon', {
+                    source_product_id_param: productId,
+                    customer_email_param: customerEmail,
+                    transaction_id_param: transaction.id
+                  });
+                const otoResult = otoResultRaw as OtoInfo | null;
+
+                if (otoError) {
+                  console.error('OTO generation error:', otoError);
+                } else if (otoResult?.has_oto) {
+                  otoInfo = otoResult;
+                } else if (otoResult?.reason) {
+                  // Pass through skipped OTO info (e.g., user already owns the product)
+                  otoInfo = otoResult;
+                }
+              }
+            } catch (otoErr) {
+              console.error('OTO generation exception:', otoErr);
+            }
+          }
+
+          // Convert database response to our interface
+          return {
+            ...baseResponse,
+            access_granted: paymentResult?.access_granted || false,
+            already_had_access: paymentResult?.already_had_access || false,
+            requires_login: paymentResult?.requires_login || false,
+            is_guest_purchase: paymentResult?.is_guest_purchase || false,
+            scenario: paymentResult?.scenario,
+            access_expires_at: paymentResult?.access_expires_at,
+            send_magic_link: paymentResult?.send_magic_link || false,
+            // Use customer email from DB result, fallback to Stripe session, fallback to what we passed in
+            customer_email: paymentResult?.customer_email || baseResponse.customer_email || customerEmail,
+            oto_info: otoInfo
+          };
+
+        } catch (error) {
+          console.error('Payment processing error:', error);
+          return {
+            ...baseResponse,
+            access_granted: false,
+            error: 'Failed to process payment completion'
+          };
+        }
+      }
+
+      // Missing required data
+      return {
+        ...baseResponse,
+        access_granted: false,
+        error: !productId ? 'Product ID missing from session metadata' : 'Customer email missing from session'
+      };
+    }
+
+    return baseResponse;
+
+  } catch (error) {
+    // Handle Stripe errors
+    if (error && typeof error === 'object' && 'type' in error) {
+      const stripeError = error as { type: string; message: string };
+      if (stripeError.type === 'StripeInvalidRequestError') {
+        return {
+          session_id: sessionId,
+          status: 'invalid',
+          payment_status: null,
+          error: 'Invalid session ID'
+        };
+      }
+    }
+
+    console.error('Payment verification error:', error);
+    return {
+      session_id: sessionId,
+      status: 'error',
+      payment_status: null,
+      error: 'Payment verification failed'
+    };
+  }
+}
+
+/**
+ * Verify Payment Intent and process payment
+ * Used for custom payment form flow (not embedded checkout)
+ */
+export async function verifyPaymentIntent(
+  paymentIntentId: string,
+  user?: User | null
+): Promise<PaymentIntentVerificationResult> {
+  // SECURITY: This function must only run on the server
+  if (typeof window !== 'undefined') {
+    throw new Error('verifyPaymentIntent can only be called on the server');
+  }
+
+  // Validate input
+  if (!paymentIntentId || typeof paymentIntentId !== 'string') {
+    return {
+      payment_intent_id: paymentIntentId || 'invalid',
+      status: 'error',
+      error: 'Invalid payment intent ID'
+    };
+  }
+
+  try {
+    // Get Stripe instance
+    const stripe = await getStripeServer();
+
+    // Retrieve payment intent from Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+    const serviceClient = createAdminClient();
+
+    if (!paymentIntent) {
+      return {
+        payment_intent_id: paymentIntentId,
+        status: 'not_found',
+        error: 'Payment intent not found'
+      };
+    }
+
+    // Base response
+    const baseResponse: PaymentIntentVerificationResult = {
+      payment_intent_id: paymentIntent.id,
+      status: paymentIntent.status,
+      customer_email: paymentIntent.receipt_email || undefined,
+      amount: paymentIntent.amount,
+      currency: paymentIntent.currency,
+      metadata: paymentIntent.metadata || undefined,
+      created: paymentIntent.created,
+    };
+
+    // If payment is successful, process it
+    if (paymentIntent.status === 'succeeded') {
+      const productId = paymentIntent.metadata?.product_id;
+      const customerEmail = paymentIntent.receipt_email || paymentIntent.metadata?.email;
+
+      if (productId && customerEmail) {
+        try {
+          // Validate email for disposable domains
+          const { ProductValidationService } = await import('@/lib/services/product-validation');
+          const isValidEmail = await ProductValidationService.validateEmail(customerEmail);
+          if (!isValidEmail) {
+            return {
+              ...baseResponse,
+              access_granted: false,
+              error: 'Invalid email address detected. Temporary email addresses are not allowed for purchases. Please contact support for assistance.',
+              scenario: 'email_validation_failed_server_side'
+            };
+          }
+
+          // Extract metadata (multi-bump support)
+          const bumpProductIdsStr = paymentIntent.metadata?.bump_product_ids || '';
+          const bumpProductIdLegacy = paymentIntent.metadata?.bump_product_id || null;
+          const couponId = paymentIntent.metadata?.coupon_id || null;
+
+          // Parse bump IDs: prefer comma-separated bump_product_ids, fallback to single
+          let bumpProductIds: string[] = bumpProductIdsStr
+            ? bumpProductIdsStr.split(',').filter((id: string) => id.length > 0)
+            : (bumpProductIdLegacy ? [bumpProductIdLegacy] : []);
+
+          // Detect metadata truncation and recover from pending transaction
+          const expectedBumpCount = parseInt(paymentIntent.metadata?.bump_count || '0', 10);
+          if (expectedBumpCount > 0 && bumpProductIds.length < expectedBumpCount) {
+            console.warn('[verify-payment] BUMP_METADATA_TRUNCATED | pi=%s | expected=%d | got=%d', paymentIntent.id, expectedBumpCount, bumpProductIds.length);
+            const { data: pendingTx } = await serviceClient
+              .from('payment_transactions')
+              .select('metadata')
+              .eq('stripe_payment_intent_id', paymentIntent.id)
+              .maybeSingle();
+            const fullBumpIds = (pendingTx?.metadata as Record<string, unknown>)?.bump_product_ids_full;
+            if (Array.isArray(fullBumpIds) && fullBumpIds.length >= expectedBumpCount) {
+              bumpProductIds = fullBumpIds as string[];
+              console.info('[verify-payment] Recovered %d bump IDs from pending transaction', fullBumpIds.length);
+            }
+          }
+
+          // Net subtotal: net-priced products validate the NET amount, not the gross. Resolve
+          // the owning Checkout Session for amount_subtotal; fail-safe → null falls back to gross.
+          let piAmountSubtotal: number | undefined;
+          try {
+            const ownerSessions = await stripe.checkout.sessions.list({ payment_intent: paymentIntent.id, limit: 1 });
+            piAmountSubtotal = ownerSessions.data[0]?.amount_subtotal ?? undefined;
+          } catch {
+            /* leave undefined — validator falls back to gross */
+          }
+
+          // Process payment using database function (multi-bump UUID array)
+          const rpcParams = {
+            session_id_param: paymentIntent.id,
+            product_id_param: productId,
+            customer_email_param: customerEmail,
+            amount_total: paymentIntent.amount,
+            currency_param: paymentIntent.currency,
+            stripe_payment_intent_id: paymentIntent.id,
+            user_id_param: user?.id || undefined,
+            bump_product_ids_param: bumpProductIds.length > 0 ? bumpProductIds : undefined,
+            coupon_id_param: couponId || undefined,
+            amount_subtotal_param: piAmountSubtotal
+          };
+
+          const { data: paymentResultRaw2, error: paymentError } = await serviceClient
+            .rpc('process_stripe_payment_completion_with_bump', rpcParams);
+
+          const paymentResult = paymentResultRaw2 as PaymentRpcResult | null;
+
+          if (paymentError) {
+            console.error(
+              '[verify-payment] PAYMENT_DB_FAILURE | pi=%s | product=%s | email=%s | coupon_id=%s | amount=%d cents | error=%s (code=%s)',
+              paymentIntent.id, productId, redactEmail(customerEmail), couponId ?? 'none',
+              paymentIntent.amount, paymentError.message, paymentError.code
+            );
+            return {
+              ...baseResponse,
+              access_granted: false,
+              error: 'Failed to process payment'
+            };
+          }
+
+          if (!paymentResult?.success) {
+            console.error(
+              '[verify-payment] PAYMENT_DB_REJECTED | pi=%s | product=%s | email=%s | coupon_id=%s | amount=%d cents | reason=%s',
+              paymentIntent.id, productId, redactEmail(customerEmail), couponId ?? 'none',
+              paymentIntent.amount, paymentResult?.error ?? 'unknown'
+            );
+            return {
+              ...baseResponse,
+              access_granted: false,
+              error: paymentResult?.error || 'Payment processing failed'
+            };
+          }
+
+          // Trigger webhook for new successful purchases
+          if (!paymentResult.already_had_access) {
+            const { data: txCustomFields } = await serviceClient
+              .from('payment_transactions')
+              .select('id, session_id, custom_field_values')
+              .eq('stripe_payment_intent_id', paymentIntent.id)
+              .maybeSingle();
+            const customFieldValues = (txCustomFields?.custom_field_values as Record<string, string> | null) ?? undefined;
+
+            // Resolve bundle components (ordered) — [] for a non-bundle product. Identical shape
+            // to the Stripe-webhook PI emitter so the winning completion path is irrelevant.
+            const componentProductIds = await resolveComponentProductIds(serviceClient, productId);
+
+            // Issue licenses — one per licensable product in [productId, ...componentProductIds].
+            // issueLicense is idempotent by (order_id, product_id); orderId = the PI id (same key
+            // the PI webhook handler uses).
+            const licenses = await issueLicensesForOrder(serviceClient, {
+              productIds: [productId, ...componentProductIds],
+              email: customerEmail,
+              userId: user?.id || null,
+              orderId: paymentIntent.id,
+              customFieldValues,
+            });
+
+            // VAT tax snapshot — tax lives on the owning Checkout Session, not the PI.
+            // The stored session_id may be this PI's id, so pass paymentIntentId too:
+            // capture resolves the real cs_ session from it (same as the PI webhook handler).
+            const taxSnapshot = await captureAndPersistOrderTax({
+              stripe,
+              supabase: serviceClient,
+              transactionId: txCustomFields?.id,
+              sessionId: txCustomFields?.session_id,
+              paymentIntentId: paymentIntent.id,
+            });
+
+            const webhookData = await buildPurchaseWebhookPayload({
+              supabaseClient: serviceClient,
+              customerEmail,
+              userId: user?.id || null,
+              productId,
+              bumpProductIds,
+              componentProductIds,
+              metadata: paymentIntent.metadata as Record<string, string | undefined> | null,
+              amount: paymentIntent.amount,
+              currency: paymentIntent.currency,
+              paymentIntentId: paymentIntent.id,
+              taxSnapshot,
+              couponId: couponId || null,
+              isGuest: paymentResult?.is_guest_purchase,
+              customFieldValues: customFieldValues ?? null,
+            });
+
+            if (licenses.length) webhookData.licenses = licenses;
+
+            WebhookService.trigger('purchase.completed', webhookData, serviceClient, [productId, ...componentProductIds, ...bumpProductIds])
+              .catch(err => console.error('Webhook trigger error:', err));
+
+            // NOTE: Server-side CAPI tracking for Purchase is handled in the
+            // Stripe webhook handler (webhooks/stripe/route.ts).
+          }
+
+          // Update user profile with company data if invoice was requested
+          if (user?.id && paymentIntent.metadata) {
+            await updateProfileWithCompanyData(
+              serviceClient,
+              user.id,
+              paymentIntent.metadata
+            );
+          }
+
+          // Generate OTO coupon if configured for this product
+          let otoInfo: OtoInfo = { has_oto: false };
+          if (paymentResult.access_granted || paymentResult.is_guest_purchase) {
+            try {
+              // Get transaction ID from payment_transactions table
+              const { data: transaction } = await serviceClient
+                .from('payment_transactions')
+                .select('id')
+                .eq('session_id', paymentIntent.id)
+                .single();
+
+              if (transaction?.id) {
+                const { data: otoResultRaw, error: otoError } = await serviceClient
+                  .rpc('generate_oto_coupon', {
+                    source_product_id_param: productId,
+                    customer_email_param: customerEmail,
+                    transaction_id_param: transaction.id
+                  });
+                const otoResult = otoResultRaw as OtoInfo | null;
+
+                if (otoError) {
+                  console.error('OTO generation error:', otoError);
+                } else if (otoResult?.has_oto) {
+                  otoInfo = otoResult;
+                } else if (otoResult?.reason) {
+                  // Pass through skipped OTO info (e.g., user already owns the product)
+                  otoInfo = otoResult;
+                }
+              }
+            } catch (otoErr) {
+              console.error('OTO generation exception:', otoErr);
+            }
+          }
+
+          // Convert database response to our interface
+          return {
+            ...baseResponse,
+            access_granted: paymentResult?.access_granted || false,
+            requires_login: paymentResult?.requires_login || false,
+            is_guest_purchase: paymentResult?.is_guest_purchase || false,
+            scenario: paymentResult?.scenario,
+            send_magic_link: paymentResult?.send_magic_link || false,
+            // Use customer email from DB result, fallback to Stripe, fallback to what we passed in
+            customer_email: paymentResult?.customer_email || baseResponse.customer_email || customerEmail,
+            oto_info: otoInfo
+          };
+
+        } catch (error) {
+          console.error('Payment processing error:', error);
+          return {
+            ...baseResponse,
+            access_granted: false,
+            error: 'Failed to process payment completion'
+          };
+        }
+      }
+
+      // Missing required data
+      return {
+        ...baseResponse,
+        access_granted: false,
+        error: !productId ? 'Product ID missing from payment intent metadata' : 'Customer email missing from payment intent'
+      };
+    }
+
+    return baseResponse;
+
+  } catch (error) {
+    // Handle Stripe errors
+    if (error && typeof error === 'object' && 'type' in error) {
+      const stripeError = error as { type: string; message: string };
+      if (stripeError.type === 'StripeInvalidRequestError') {
+        return {
+          payment_intent_id: paymentIntentId,
+          status: 'invalid',
+          error: 'Invalid payment intent ID'
+        };
+      }
+    }
+
+    console.error('Payment intent verification error:', error);
+    return {
+      payment_intent_id: paymentIntentId,
+      status: 'error',
+      error: 'Payment intent verification failed'
+    };
+  }
+}

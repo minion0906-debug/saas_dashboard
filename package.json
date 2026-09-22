@@ -1,0 +1,49 @@
+{
+  "name": "sellf",
+  "version": "2026.9.2",
+  "description": "Source-available platform for selling digital products and recurring subscriptions, with content protection. Built on Next.js, Supabase, and Stripe.",
+  "main": "sellf.js",
+  "scripts": {
+    "setup": "bun run scripts/setup-supabase.ts",
+    "setup:supabase": "bun run scripts/setup-supabase.ts",
+    "dev": "python3 -m http.server 8000",
+    "lint": "echo 'No linting configured'",
+    "test": "echo 'No tests configured'"
+  },
+  "keywords": [
+    "digital-products",
+    "subscriptions",
+    "memberships",
+    "supabase",
+    "stripe",
+    "nextjs",
+    "content-protection",
+    "payment-gateway",
+    "self-hosted",
+    "source-available"
+  ],
+  "author": "jurczykpawel",
+  "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jurczykpawel/sellf.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jurczykpawel/sellf/issues"
+  },
+  "homepage": "https://github.com/jurczykpawel/sellf#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "devDependencies": {
+    "autocannon": "^8.0.0",
+    "supabase": "^2.101.0"
+  },
+  "files": [
+    "sellf.js",
+    "dist/",
+    "examples/",
+    "sql/",
+    "README.md"
+  ]
+}

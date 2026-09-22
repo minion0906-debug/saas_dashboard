@@ -1,0 +1,38 @@
+{
+  "name": "@sellf/mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Sellf - enables AI assistants to manage products, users, payments, and analytics",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "build": "tsc",
+    "start": "bun dist/index.js",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "test": "bunx vitest run",
+    "test:watch": "bunx vitest",
+    "test:coverage": "bunx vitest run --coverage"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sellf",
+    "ai",
+    "claude"
+  ],
+  "author": "Sellf",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^5.9.3",
+    "vitest": "^5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

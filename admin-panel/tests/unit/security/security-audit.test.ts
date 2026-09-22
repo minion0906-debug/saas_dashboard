@@ -1,0 +1,474 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+/**
+ * ============================================================================
+ * UNIT TEST: Security Audit Server Action
+ * ============================================================================
+ *
+ * Tests the security audit logic that checks Supabase configuration.
+ * Mocks fetch() to simulate various Supabase API responses.
+ *
+ * @see lib/actions/security-audit.ts
+ * ============================================================================
+ */
+
+// Mock Supabase client before importing the module
+// withAdminAuth calls: supabase.auth.getUser() → supabase.from('admin_users').select().eq().single()
+vi.mock('@/lib/supabase/server', () => ({
+  createClient: vi.fn().mockResolvedValue({
+    auth: {
+      getUser: vi.fn().mockResolvedValue({
+        data: { user: { id: 'test-admin-user-id' } },
+        error: null,
+      }),
+    },
+    from: vi.fn().mockReturnValue({
+      select: vi.fn().mockReturnValue({
+        eq: vi.fn().mockReturnValue({
+          single: vi.fn().mockResolvedValue({
+            data: { user_id: 'test-admin-user-id' },
+            error: null,
+          }),
+        }),
+      }),
+    }),
+  }),
+}));
+
+// Must import after mocks
+const { getSecurityAudit, runSecurityAudit } = await import('@/lib/actions/security-audit');
+
+describe('Security Audit', () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    process.env.SUPABASE_URL = 'http://127.0.0.1:54321';
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = 'test-anon-key';
+    // Reset module cache to clear cached audit results
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    vi.restoreAllMocks();
+  });
+
+  describe('runSecurityAudit', () => {
+    it('returns 6 checks on success', async () => {
+      // Mock all fetch calls to return "safe" responses
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/graphql/v1')) {
+          return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+        }
+        if (url.includes('/mcp')) {
+          return Promise.resolve({ status: 404 });
+        }
+        if (url.includes('/rest/v1/rpc/')) {
+          return Promise.resolve({ ok: false, json: () => Promise.resolve({ message: 'not found' }) });
+        }
+        if (url.includes('/rest/v1/')) {
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({}),
+          });
+        }
+        if (url.includes('/auth/v1/settings')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ mailer_autoconfirm: false }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+
+      expect(result.success).toBe(true);
+      expect(result.checks).toHaveLength(18);
+      expect(result.timestamp).toBeTruthy();
+      expect(result.checks.every(c => c.id && c.name && c.status && c.message)).toBe(true);
+    });
+
+    it('detects GraphQL introspection enabled', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/graphql/v1')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ data: { __schema: { queryType: { name: 'Query' } } } }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'graphql-introspection');
+
+      expect(check?.status).toBe('warn');
+      expect(check?.fix).toBeTruthy();
+    });
+
+    it('detects MCP endpoint accessible', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/mcp')) {
+          return Promise.resolve({ status: 406 }); // Not 404 = accessible
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'mcp-endpoint');
+
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('406');
+    });
+
+    it('detects server version headers exposed', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/rest/v1/') && !url.includes('/rpc/')) {
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({
+              'server': 'postgrest/12.2.12',
+              'via': 'kong/2.8.1',
+            }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'version-headers');
+
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('postgrest');
+    });
+
+    it('treats a bare CDN identifier (Server: cloudflare) as pass, not warn', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/rest/v1/') && !url.includes('/rpc/')) {
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'server': 'cloudflare' }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'version-headers');
+
+      expect(check?.status).toBe('pass');
+      expect(check?.message?.toLowerCase()).toContain('cdn');
+      expect(check?.fix).toBeUndefined();
+    });
+
+    it('warns when NODE_ENV=production and TRUSTED_PROXY is not "true"', async () => {
+      const prevNodeEnv = process.env.NODE_ENV;
+      const prevTrusted = process.env.TRUSTED_PROXY;
+      try {
+        // @ts-expect-error — vitest test override
+        process.env.NODE_ENV = 'production';
+        delete process.env.TRUSTED_PROXY;
+
+        global.fetch = vi.fn().mockImplementation(() =>
+          Promise.resolve({ ok: true, status: 200, headers: new Headers({}), json: () => Promise.resolve({}) })
+        );
+
+        const result = await runSecurityAudit();
+        const check = result.checks.find(c => c.id === 'trusted-proxy');
+
+        expect(check?.status).toBe('warn');
+        expect(check?.message).toContain('TRUSTED_PROXY');
+        expect(check?.message?.toLowerCase()).toContain('rate');
+        expect(check?.fix).toBeDefined();
+      } finally {
+        // @ts-expect-error — vitest test override
+        process.env.NODE_ENV = prevNodeEnv;
+        if (prevTrusted !== undefined) process.env.TRUSTED_PROXY = prevTrusted;
+      }
+    });
+
+    it('passes the trusted-proxy check when NODE_ENV=production and TRUSTED_PROXY=true', async () => {
+      const prevNodeEnv = process.env.NODE_ENV;
+      const prevTrusted = process.env.TRUSTED_PROXY;
+      try {
+        // @ts-expect-error — vitest test override
+        process.env.NODE_ENV = 'production';
+        process.env.TRUSTED_PROXY = 'true';
+
+        global.fetch = vi.fn().mockImplementation(() =>
+          Promise.resolve({ ok: true, status: 200, headers: new Headers({}), json: () => Promise.resolve({}) })
+        );
+
+        const result = await runSecurityAudit();
+        const check = result.checks.find(c => c.id === 'trusted-proxy');
+
+        expect(check?.status).toBe('pass');
+      } finally {
+        // @ts-expect-error — vitest test override
+        process.env.NODE_ENV = prevNodeEnv;
+        if (prevTrusted === undefined) delete process.env.TRUSTED_PROXY;
+        else process.env.TRUSTED_PROXY = prevTrusted;
+      }
+    });
+
+    it('detects email autoconfirm enabled', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/auth/v1/settings')) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ mailer_autoconfirm: true }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'email-autoconfirm');
+
+      expect(check?.status).toBe('fail');
+      expect(check?.fix).toContain('enable_confirmations');
+    });
+
+    it('detects product count leak via Prefer header', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/rest/v1/products')) {
+          return Promise.resolve({
+            ok: true,
+            headers: new Headers({ 'content-range': '0-12/13' }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'count-header-leak');
+
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('0-12/13');
+    });
+
+    it('detects RPC function name hints', async () => {
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/rpc/nonexistent')) {
+          return Promise.resolve({
+            ok: false,
+            json: () => Promise.resolve({
+              hint: 'Perhaps you meant to call the function public.log_admin_action',
+            }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'rpc-function-hints');
+
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('log_admin_action');
+    });
+
+    it('all pass when properly configured', async () => {
+      // Set ALL env vars needed for every security check to pass
+      process.env.SITE_URL = 'https://myapp.example.com';
+      process.env.NEXT_PUBLIC_SITE_URL = 'https://myapp.example.com';
+      process.env.ALLOWED_ORIGINS = 'https://customer.com';
+      process.env.ALTCHA_HMAC_KEY = 'test-hmac-key-for-captcha';
+      // base64-encoded 32 bytes (openssl rand -base64 32 output format)
+      process.env.APP_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+      process.env.CRON_SECRET = 'test-cron-secret';
+      process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_secret';
+      // Force-clear any Turnstile vars from .env.local — the captcha check
+      // is in 'fail' state when SITE_KEY is set but SECRET_KEY is missing,
+      // and we're testing the ALTCHA-only configuration here.
+      delete process.env.CLOUDFLARE_TURNSTILE_SITE_KEY;
+      delete process.env.NEXT_PUBLIC_CLOUDFLARE_TURNSTILE_SITE_KEY;
+      delete process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY;
+
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/graphql/v1')) {
+          return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+        }
+        if (url.includes('/mcp')) {
+          return Promise.resolve({ status: 404 });
+        }
+        if (url.includes('/auth/v1/settings')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ mailer_autoconfirm: false }) });
+        }
+        if (url.includes('/rpc/nonexistent')) {
+          return Promise.resolve({ ok: false, json: () => Promise.resolve({ message: 'not found' }) });
+        }
+        if (url.includes('/rest/v1/')) {
+          return Promise.resolve({ ok: true, headers: new Headers({}) });
+        }
+        // HTTPS redirect check (http:// → 301 to https://)
+        if (url.startsWith('http://')) {
+          return Promise.resolve({ status: 301, headers: new Headers({ 'location': url.replace('http://', 'https://') }) });
+        }
+        // HSTS + cookie checks (https:// site URL)
+        if (url.startsWith('https://')) {
+          return Promise.resolve({
+            ok: true, status: 200,
+            headers: new Headers({ 'strict-transport-security': 'max-age=31536000; includeSubDomains' }),
+            getSetCookie: () => ['NEXT_LOCALE=en; Path=/; Secure; SameSite=lax'],
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+
+      expect(result.success).toBe(true);
+      // Every check should be a clean pass — info entries (e.g., trusted-domain
+      // listings, stripe-mode summary) are also acceptable since they are
+      // read-only summaries, not findings. Only warn / fail should be empty.
+      expect(result.checks.every(c => c.status === 'pass' || c.status === 'info')).toBe(true);
+      expect(result.checks.filter(c => c.status === 'warn' || c.status === 'fail')).toHaveLength(0);
+      const nonInfo = result.checks.filter(c => c.status !== 'info');
+      expect(nonInfo.every(c => c.fix === undefined)).toBe(true);
+    });
+
+    it('warns, not fails, when ALTCHA is active but a stale Turnstile site key is present', async () => {
+      process.env.SITE_URL = 'https://myapp.example.com';
+      process.env.ALLOWED_ORIGINS = 'https://customer.com';
+      process.env.ALTCHA_HMAC_KEY = 'test-hmac-key-for-captcha';
+      process.env.CLOUDFLARE_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+      delete process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY;
+      process.env.APP_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+      process.env.CRON_SECRET = 'test-cron-secret';
+      process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_secret';
+
+      global.fetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/graphql/v1')) {
+          return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+        }
+        if (url.includes('/mcp')) {
+          return Promise.resolve({ status: 404 });
+        }
+        if (url.includes('/auth/v1/settings')) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ mailer_autoconfirm: false }) });
+        }
+        if (url.includes('/rpc/nonexistent')) {
+          return Promise.resolve({ ok: false, json: () => Promise.resolve({ message: 'not found' }) });
+        }
+        if (url.includes('/rest/v1/')) {
+          return Promise.resolve({ ok: true, headers: new Headers({}) });
+        }
+        if (url.startsWith('http://')) {
+          return Promise.resolve({ status: 301, headers: new Headers({ location: url.replace('http://', 'https://') }) });
+        }
+        if (url.startsWith('https://')) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            headers: new Headers({ 'strict-transport-security': 'max-age=31536000; includeSubDomains' }),
+            getSetCookie: () => ['NEXT_LOCALE=en; Path=/; Secure; SameSite=lax'],
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const result = await runSecurityAudit();
+      const check = result.checks.find(c => c.id === 'captcha');
+
+      expect(check?.status).toBe('warn');
+      expect(check?.message).toContain('ALTCHA is configured and active');
+      expect(check?.fix).toContain('Remove CLOUDFLARE_TURNSTILE_SITE_KEY');
+    });
+  });
+
+  describe('getSecurityAudit (caching)', () => {
+    it('returns cached result on second call', async () => {
+      let fetchCount = 0;
+      global.fetch = vi.fn().mockImplementation(() => {
+        fetchCount++;
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const first = await runSecurityAudit(); // populate cache
+      fetchCount = 0;
+
+      const second = await getSecurityAudit(); // should use cache
+
+      expect(second.timestamp).toBe(first.timestamp);
+      expect(fetchCount).toBe(0); // no new fetch calls
+    });
+
+    it('runSecurityAudit always bypasses cache', async () => {
+      global.fetch = vi.fn().mockImplementation(() => {
+        return Promise.resolve({ ok: true, status: 404, headers: new Headers({}), json: () => Promise.resolve({}) });
+      });
+
+      const first = await runSecurityAudit();
+
+      // Small delay to get different timestamp
+      await new Promise(r => setTimeout(r, 10));
+
+      const second = await runSecurityAudit(); // should bypass cache
+
+      expect(second.timestamp).not.toBe(first.timestamp);
+    });
+  });
+
+  describe('authorization', () => {
+    it('rejects non-admin users', async () => {
+      const { createClient } = await import('@/lib/supabase/server');
+      vi.mocked(createClient).mockResolvedValueOnce({
+        auth: {
+          getUser: vi.fn().mockResolvedValue({
+            data: { user: { id: 'non-admin-user-id' } },
+            error: null,
+          }),
+        },
+        from: vi.fn().mockReturnValue({
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              single: vi.fn().mockResolvedValue({
+                data: null,
+                error: null,
+              }),
+            }),
+          }),
+        }),
+      } as never);
+
+      const result = await runSecurityAudit();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Forbidden');
+      expect(result.checks).toHaveLength(0);
+    });
+  });
+
+  describe('missing configuration', () => {
+    it('returns error when SUPABASE_URL is missing', async () => {
+      delete process.env.SUPABASE_URL;
+
+      const result = await runSecurityAudit();
+
+      expect(result.success).toBe(false);
+      // Auth check (withAdminClient) runs before audit, so error may be auth-related
+      // when Supabase is not configured
+      expect(result.error).toBeDefined();
+    });
+  });
+
+  describe('fetch error handling', () => {
+    it('handles network errors gracefully', async () => {
+      process.env.NEXT_PUBLIC_SITE_URL = 'https://myapp.example.com';
+      global.fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      const result = await runSecurityAudit();
+
+      // Should still succeed — fetch-based checks return pass (unreachable = likely blocked)
+      expect(result.success).toBe(true);
+      expect(result.checks.length).toBeGreaterThan(0);
+      // Supabase checks return pass on network error (unreachable = likely blocked)
+      const supabaseChecks = result.checks.filter(c =>
+        ['graphql-introspection', 'mcp-endpoint', 'version-headers', 'email-autoconfirm', 'count-header-leak', 'rpc-function-hints'].includes(c.id)
+      );
+      expect(supabaseChecks.every(c => c.status === 'pass')).toBe(true);
+    });
+  });
+});

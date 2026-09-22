@@ -1,0 +1,844 @@
+@import "tailwindcss";
+
+/* Class-based dark mode (controlled by ThemeProvider via .dark on <html>) */
+@custom-variant dark (&:where(.dark *));
+
+/* ===== Sellf Brand Design Tokens ===== */
+
+/* Dark mode (default — dark-first) */
+:root {
+  --sf-bg-deep: #06080D;
+  --sf-bg-base: #0B1120;
+  --sf-bg-raised: #111B2E;
+  --sf-bg-float: #162236;
+  --sf-bg-hover: #1a2740;
+  --sf-bg-row-alt: #0e1626;
+  --sf-bg-input: #0B1120;
+
+  --sf-accent: #0078BB;
+  --sf-accent-bg: var(--sf-accent);
+  --sf-accent-soft: rgba(0,120,187,0.10);
+  --sf-accent-med: rgba(0,120,187,0.22);
+  --sf-accent-hover: #2090D0;
+  --sf-accent-glow: rgba(0,120,187,0.35);
+
+  /* Tailwind v4 @theme overrides: brighter colors for dark-mode text contrast */
+  --color-sf-accent: #1A8FC8;
+  --color-sf-danger: #F25555;
+
+  --sf-text-heading: #F0F4FA;
+  --sf-text-body: #94A3B8;
+  --sf-text-muted: #7A8DA3;
+  --sf-text-inverse: #0b1120;
+
+  --sf-border: rgba(255,255,255,0.06);
+  --sf-border-accent: rgba(0,120,187,0.18);
+
+  --sf-success: #10B981;
+  --sf-success-soft: rgba(16,185,129,0.10);
+  --sf-warning: #F59E0B;
+  --sf-warning-soft: rgba(245,158,11,0.10);
+  --sf-danger: #EF4444;
+  --sf-danger-bg: var(--sf-danger);
+  --sf-danger-soft: rgba(239,68,68,0.10);
+  --sf-info: #F97316;
+  --sf-info-soft: rgba(249,115,22,0.10);
+
+  --sf-sidebar-bg: #070c18;
+  --sf-sidebar-text: #7A8DA3;
+  --sf-sidebar-text-active: #F0F4FA;
+  --sf-sidebar-accent: rgba(0,120,187,0.12);
+
+  --sf-shadow: 0 4px 24px -4px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.04);
+  --sf-shadow-accent: 0 4px 30px -4px rgba(0,120,187,0.30);
+
+  /* Tooltip — inverted from main theme for contrast */
+  --sf-tooltip-bg: #F0F4FA;
+  --sf-tooltip-text: #0B1120;
+
+  /* Brutalist border tiers */
+  --sf-border-subtle: rgba(255,255,255,0.06);
+  --sf-border-medium: rgba(255,255,255,0.12);
+  --sf-border-strong: rgba(255,255,255,0.20);
+
+  /* Layout dimensions */
+  --sf-sidebar-width-collapsed: 80px;
+  --sf-sidebar-width-expanded: 260px;
+  --sf-topbar-height: 56px;
+
+  /* Timing */
+  --sf-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --sf-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --sf-duration-fast: 150ms;
+  --sf-duration-normal: 250ms;
+  --sf-duration-slow: 400ms;
+
+  /* Typography defaults (overridable by theme) */
+  --sf-font-family: inherit;
+  --sf-font-heading-weight: 700;
+  --sf-font-body-weight: 400;
+
+  /* Shape defaults (overridable by theme) */
+  --sf-radius-sm: 6px;
+  --sf-radius-md: 12px;
+  --sf-radius-lg: 16px;
+  --sf-radius-full: 9999px;
+}
+
+/* Light mode overrides — when .dark is NOT on <html>, landing uses these */
+:root:not(.dark) {
+  --sf-bg-deep: #F0F4F8;
+  --sf-bg-base: #FFFFFF;
+  --sf-bg-raised: #F1F5F9;
+  --sf-bg-float: #FAFCFF;
+  --sf-bg-hover: #f0f4f8;
+  --sf-bg-row-alt: #f8fafc;
+  --sf-bg-input: #ffffff;
+
+  --sf-accent: #006AAB;
+  --sf-accent-bg: var(--sf-accent);
+  --sf-accent-soft: rgba(0,106,171,0.08);
+  --sf-accent-med: rgba(0,106,171,0.15);
+  --sf-accent-hover: #005C8F;
+  --sf-accent-glow: rgba(0,106,171,0.20);
+
+  --sf-text-heading: #0B1120;
+  --sf-text-body: #3E5068;
+  --sf-text-muted: #5b6578;
+  --sf-text-inverse: #ffffff;
+
+  /* Tooltip — inverted from main theme for contrast */
+  --sf-tooltip-bg: #0B1120;
+  --sf-tooltip-text: #F0F4FA;
+
+  --sf-border: rgba(0,0,0,0.10);
+  --sf-border-accent: rgba(0,112,184,0.18);
+
+  --sf-success: #065f46;
+  --sf-success-soft: rgba(6,95,70,0.12);
+  --sf-warning: #92400E;
+  --sf-warning-soft: rgba(146,64,14,0.12);
+  --sf-danger: #991B1B;
+  --sf-danger-bg: var(--sf-danger);
+  --sf-danger-soft: rgba(153,27,27,0.12);
+  --sf-info: #B93F0B;
+  --sf-info-soft: rgba(185,63,11,0.10);
+
+  --sf-sidebar-bg: #f8fafc;
+  --sf-sidebar-text: #5b6578;
+  --sf-sidebar-text-active: #0b1120;
+  --sf-sidebar-accent: rgba(0,112,184,0.08);
+
+  --sf-shadow: 0 4px 24px -4px rgba(0,0,0,0.12), 0 0 0 1px rgba(0,0,0,0.06);
+  --sf-shadow-accent: 0 4px 30px -4px rgba(0,112,184,0.20);
+
+  /* Brutalist border tiers (light) */
+  --sf-border-subtle: rgba(0,0,0,0.06);
+  --sf-border-medium: rgba(0,0,0,0.12);
+  --sf-border-strong: rgba(0,0,0,0.20);
+
+  /* Tailwind v4 @theme color overrides for light mode
+     (needed because @theme resolves var() at build time, not runtime) */
+  --color-sf-accent: #006AAB;
+  --color-sf-accent-bg: var(--color-sf-accent);
+  --color-sf-accent-soft: rgba(0,106,171,0.08);
+  --color-sf-accent-med: rgba(0,106,171,0.15);
+  --color-sf-accent-hover: #005C8F;
+  --color-sf-accent-glow: rgba(0,106,171,0.20);
+  --color-sf-success: #065f46;
+  --color-sf-success-soft: rgba(6,95,70,0.12);
+  --color-sf-warning: #92400E;
+  --color-sf-warning-soft: rgba(146,64,14,0.12);
+  --color-sf-danger: #991B1B;
+  --color-sf-danger-bg: var(--color-sf-danger);
+  --color-sf-danger-soft: rgba(153,27,27,0.12);
+  --color-sf-heading: #0B1120;
+  --color-sf-body: #3E5068;
+  --color-sf-muted: #5b6578;
+  --color-sf-inverse: #ffffff;
+  --color-sf-deep: #F0F4F8;
+  --color-sf-base: #FFFFFF;
+  --color-sf-raised: #F1F5F9;
+  --color-sf-float: #FAFCFF;
+  --color-sf-hover: #f0f4f8;
+  --color-sf-row-alt: #f8fafc;
+  --color-sf-input: #ffffff;
+  --color-sf-border: rgba(0,0,0,0.10);
+  --color-sf-border-accent: rgba(0,106,171,0.18);
+  --color-sf-border-subtle: rgba(0,0,0,0.06);
+  --color-sf-border-medium: rgba(0,0,0,0.12);
+  --color-sf-border-strong: rgba(0,0,0,0.20);
+  --color-sf-info: #B93F0B;
+  --color-sf-info-soft: rgba(185,63,11,0.10);
+  --color-sf-sidebar-bg: #f8fafc;
+  --color-sf-sidebar-text: #5b6578;
+  --color-sf-sidebar-text-active: #0b1120;
+  --color-sf-sidebar-accent: rgba(0,106,171,0.08);
+}
+
+/* Tailwind v4 theme tokens — enables bg-sf-deep, text-sf-accent, etc. */
+@theme {
+  --color-sf-deep: var(--sf-bg-deep);
+  --color-sf-base: var(--sf-bg-base);
+  --color-sf-raised: var(--sf-bg-raised);
+  --color-sf-float: var(--sf-bg-float);
+  --color-sf-accent: var(--sf-accent);
+  --color-sf-accent-bg: var(--sf-accent-bg);
+  --color-sf-accent-hover: var(--sf-accent-hover);
+  --color-sf-accent-soft: var(--sf-accent-soft);
+  --color-sf-accent-med: var(--sf-accent-med);
+  --color-sf-accent-glow: var(--sf-accent-glow);
+  --color-sf-heading: var(--sf-text-heading);
+  --color-sf-body: var(--sf-text-body);
+  --color-sf-muted: var(--sf-text-muted);
+  --color-sf-border: var(--sf-border);
+  --color-sf-border-accent: var(--sf-border-accent);
+  --color-sf-success: var(--sf-success);
+  --color-sf-success-soft: var(--sf-success-soft);
+  --color-sf-warning: var(--sf-warning);
+  --color-sf-warning-soft: var(--sf-warning-soft);
+  --color-sf-danger: var(--sf-danger);
+  --color-sf-danger-bg: var(--sf-danger-bg);
+  --color-sf-danger-soft: var(--sf-danger-soft);
+  --color-sf-info: var(--sf-info);
+  --color-sf-info-soft: var(--sf-info-soft);
+  --color-sf-hover: var(--sf-bg-hover);
+  --color-sf-row-alt: var(--sf-bg-row-alt);
+  --color-sf-input: var(--sf-bg-input);
+  --color-sf-inverse: var(--sf-text-inverse);
+  --color-sf-tooltip-bg: var(--sf-tooltip-bg);
+  --color-sf-tooltip-text: var(--sf-tooltip-text);
+  --color-sf-sidebar-bg: var(--sf-sidebar-bg);
+  --color-sf-sidebar-text: var(--sf-sidebar-text);
+  --color-sf-sidebar-text-active: var(--sf-sidebar-text-active);
+  --color-sf-sidebar-accent: var(--sf-sidebar-accent);
+  --color-sf-border-subtle: var(--sf-border-subtle);
+  --color-sf-border-medium: var(--sf-border-medium);
+  --color-sf-border-strong: var(--sf-border-strong);
+}
+
+/* Sidebar layout — desktop margin for fixed sidebar */
+@media (min-width: 1024px) {
+  .sf-main-content {
+    margin-left: var(--sf-sidebar-width-collapsed);
+    transition: margin-left var(--sf-duration-slow) var(--sf-ease-out);
+  }
+  .sf-main-content.sf-pinned {
+    margin-left: var(--sf-sidebar-width-expanded);
+  }
+}
+
+/* Gradient text — accent to lighter shade, used on hero headlines */
+.text-gradient-accent {
+  background: linear-gradient(135deg, var(--sf-accent) 0%, color-mix(in srgb, var(--sf-accent) 60%, white) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Grain noise overlay — static background image, no compositing overhead */
+.grain-overlay {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}
+
+/* Section divider — gradient line for visual rhythm between sections */
+.section-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--sf-border-accent), transparent);
+}
+
+/* Brand glow — radial accent glow for storefront brand moment */
+.brand-glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 80% 60% at 50% 50%, var(--sf-accent-glow) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Accent divider — gradient line with accent color for storefront sections */
+.accent-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent 0%, var(--sf-accent) 30%, var(--sf-accent) 70%, transparent 100%);
+  opacity: 0.35;
+}
+
+/* ===== Scroll Reveal System (CSS-only, single IntersectionObserver) ===== */
+
+/* Single-element reveals */
+.reveal {
+  --reveal-delay: 0ms;
+  will-change: transform, opacity;
+}
+
+.reveal-fade-up {
+  opacity: 0;
+  transform: translateY(28px);
+  transition:
+    opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay),
+    transform 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay);
+}
+.reveal-fade-up.in-view { opacity: 1; transform: translateY(0); }
+
+.reveal-fade-down {
+  opacity: 0;
+  transform: translateY(-28px);
+  transition:
+    opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay),
+    transform 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay);
+}
+.reveal-fade-down.in-view { opacity: 1; transform: translateY(0); }
+
+.reveal-fade-left {
+  opacity: 0;
+  transform: translateX(-32px);
+  transition:
+    opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay),
+    transform 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay);
+}
+.reveal-fade-left.in-view { opacity: 1; transform: translateX(0); }
+
+.reveal-fade-right {
+  opacity: 0;
+  transform: translateX(32px);
+  transition:
+    opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay),
+    transform 0.7s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay);
+}
+.reveal-fade-right.in-view { opacity: 1; transform: translateX(0); }
+
+.reveal-scale {
+  opacity: 0;
+  transform: scale(0.92);
+  transition:
+    opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay),
+    transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay);
+}
+.reveal-scale.in-view { opacity: 1; transform: scale(1); }
+
+.reveal-clip-up {
+  clip-path: inset(100% 0 0 0);
+  transition: clip-path 0.8s cubic-bezier(0.16, 1, 0.3, 1) var(--reveal-delay);
+}
+.reveal-clip-up.in-view { clip-path: inset(0 0 0 0); }
+
+/* Group reveals — parent gets .in-view, children animate with stagger */
+.reveal-group-item {
+  --stagger-index: 0;
+  --stagger-delay: 80ms;
+  will-change: transform, opacity;
+}
+
+.reveal-group-fade-up .reveal-group-item {
+  opacity: 0;
+  transform: translateY(24px);
+  transition:
+    opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay)),
+    transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay));
+}
+.reveal-group-fade-up.in-view .reveal-group-item { opacity: 1; transform: translateY(0); }
+
+.reveal-group-scale .reveal-group-item {
+  opacity: 0;
+  transform: scale(0.9);
+  transition:
+    opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay)),
+    transform 0.5s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay));
+}
+.reveal-group-scale.in-view .reveal-group-item { opacity: 1; transform: scale(1); }
+
+.reveal-group-fade-left .reveal-group-item {
+  opacity: 0;
+  transform: translateX(-24px);
+  transition:
+    opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay)),
+    transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay));
+}
+.reveal-group-fade-left.in-view .reveal-group-item { opacity: 1; transform: translateX(0); }
+
+.reveal-group-fade-right .reveal-group-item {
+  opacity: 0;
+  transform: translateX(24px);
+  transition:
+    opacity 0.6s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay)),
+    transform 0.6s cubic-bezier(0.16, 1, 0.3, 1) calc(var(--stagger-index) * var(--stagger-delay));
+}
+.reveal-group-fade-right.in-view .reveal-group-item { opacity: 1; transform: translateX(0); }
+
+/* Clean up will-change after animation completes */
+.reveal.in-view,
+.reveal-group.in-view .reveal-group-item {
+  will-change: auto;
+  transition-delay: 0ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grain-overlay { background-image: none; }
+  .reveal, .reveal-group-item {
+    opacity: 1 !important;
+    transform: none !important;
+    clip-path: none !important;
+    transition: none !important;
+    will-change: auto !important;
+  }
+}
+
+/* Modal animations */
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes modalOut {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95) translateY(-10px);
+  }
+}
+
+.modal-backdrop {
+  backdrop-filter: blur(4px);
+}
+
+/* Custom scrollbar for modal content */
+.modal-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+}
+
+.modal-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.modal-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.modal-scroll::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.5);
+  border-radius: 3px;
+}
+
+.modal-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.7);
+}
+
+/* Mobile responsive modal adjustments */
+@media (max-height: 640px) {
+  .fixed.inset-0.flex {
+    align-items: flex-start;
+    padding-top: 1rem;
+    padding-bottom: 1rem;
+  }
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --card: #ffffff;
+  --card-foreground: #171717;
+  --popover: #ffffff;
+  --popover-foreground: #171717;
+  --primary: #171717;
+  --primary-foreground: #ffffff;
+  --secondary: #f5f5f5;
+  --secondary-foreground: #171717;
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+  --accent: #f5f5f5;
+  --accent-foreground: #171717;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #171717;
+  --radius: 0.5rem;
+}
+
+
+.dark {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --card: #0a0a0a;
+  --card-foreground: #ededed;
+  --popover: #0a0a0a;
+  --popover-foreground: #ededed;
+  --primary: #ededed;
+  --primary-foreground: #0a0a0a;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #ededed;
+  --muted: #1a1a1a;
+  --muted-foreground: #a3a3a3;
+  --accent: #1a1a1a;
+  --accent-foreground: #ededed;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #262626;
+  --input: #262626;
+  --ring: #ededed;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-feature-settings: "rlig" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Dashboard uses DM Sans for brutalist/industrial aesthetic */
+.sf-dashboard {
+  font-family: var(--font-dm-sans), system-ui, sans-serif;
+}
+
+.sf-dashboard .font-mono,
+.sf-dashboard code,
+.sf-dashboard pre {
+  font-family: var(--font-dm-mono), ui-monospace, monospace;
+}
+
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fade-in 0.5s ease-in-out;
+  }
+
+  .animate-slide-in {
+    animation: slide-in 0.3s ease-out;
+  }
+
+  .animate-scale-in {
+    animation: scale-in 0.2s ease-out;
+  }
+
+  .animate-blob {
+    animation: blob 7s infinite;
+  }
+
+  .animate-gradient {
+    background-size: 200% 200%;
+    animation: gradient-shift 3s ease infinite;
+  }
+
+  .animation-delay-2000 {
+    animation-delay: 2s;
+  }
+
+  .animation-delay-4000 {
+    animation-delay: 4s;
+  }
+}
+
+@keyframes blob {
+  0% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  33% {
+    transform: translate(30px, -50px) scale(1.1);
+  }
+  66% {
+    transform: translate(-20px, 20px) scale(0.9);
+  }
+  100% {
+    transform: translate(0px, 0px) scale(1);
+  }
+}
+
+@keyframes gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes fade-in {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in {
+  0% {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes scale-in {
+  0% {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes kinetic-reveal {
+  0% {
+    clip-path: inset(0 100% 0 0);
+    opacity: 0;
+  }
+  40% {
+    opacity: 1;
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@keyframes stat-slide-up {
+  0% {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes progress-fill {
+  0% {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  100% {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+}
+
+
+/* Datetime-local and date inputs — color scheme for native picker */
+input[type="datetime-local"],
+input[type="date"] {
+  color-scheme: light;
+}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover,
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
+.dark input[type="datetime-local"],
+.dark input[type="date"] {
+  color-scheme: dark;
+}
+
+/* Custom styles for the calendar popup */
+input[type="datetime-local"]::-webkit-datetime-edit,
+input[type="date"]::-webkit-datetime-edit {
+  padding: 0;
+  color: inherit;
+}
+
+input[type="datetime-local"]::-webkit-datetime-edit-fields-wrapper,
+input[type="date"]::-webkit-datetime-edit-fields-wrapper {
+  padding: 0;
+}
+
+input[type="datetime-local"]::-webkit-datetime-edit-text,
+input[type="date"]::-webkit-datetime-edit-text {
+  color: inherit;
+  padding: 0 0.25rem;
+}
+
+input[type="datetime-local"]::-webkit-datetime-edit-month-field,
+input[type="datetime-local"]::-webkit-datetime-edit-day-field,
+input[type="datetime-local"]::-webkit-datetime-edit-year-field,
+input[type="datetime-local"]::-webkit-datetime-edit-hour-field,
+input[type="datetime-local"]::-webkit-datetime-edit-minute-field,
+input[type="datetime-local"]::-webkit-datetime-edit-second-field,
+input[type="datetime-local"]::-webkit-datetime-edit-millisecond-field,
+input[type="datetime-local"]::-webkit-datetime-edit-meridiem-field,
+input[type="date"]::-webkit-datetime-edit-month-field,
+input[type="date"]::-webkit-datetime-edit-day-field,
+input[type="date"]::-webkit-datetime-edit-year-field {
+  color: inherit;
+  font-weight: normal;
+  padding: 0;
+}
+
+/* Focus styles */
+input[type="datetime-local"]:focus::-webkit-datetime-edit-month-field,
+input[type="datetime-local"]:focus::-webkit-datetime-edit-day-field,
+input[type="datetime-local"]:focus::-webkit-datetime-edit-year-field,
+input[type="datetime-local"]:focus::-webkit-datetime-edit-hour-field,
+input[type="datetime-local"]:focus::-webkit-datetime-edit-minute-field,
+input[type="date"]:focus::-webkit-datetime-edit-month-field,
+input[type="date"]:focus::-webkit-datetime-edit-day-field,
+input[type="date"]:focus::-webkit-datetime-edit-year-field {
+  background-color: rgba(59, 130, 246, 0.1);
+  border-radius: 0.25rem;
+  outline: none;
+}
+
+.dark input[type="datetime-local"]:focus::-webkit-datetime-edit-month-field,
+.dark input[type="datetime-local"]:focus::-webkit-datetime-edit-day-field,
+.dark input[type="datetime-local"]:focus::-webkit-datetime-edit-year-field,
+.dark input[type="datetime-local"]:focus::-webkit-datetime-edit-hour-field,
+.dark input[type="datetime-local"]:focus::-webkit-datetime-edit-minute-field,
+.dark input[type="date"]:focus::-webkit-datetime-edit-month-field,
+.dark input[type="date"]:focus::-webkit-datetime-edit-day-field,
+.dark input[type="date"]:focus::-webkit-datetime-edit-year-field {
+  background-color: rgba(59, 130, 246, 0.2);
+}
+
+@layer components {
+  .animate-modal-appear {
+    animation: modal-appear 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+
+/* Custom scrollbar for time picker */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #d1d5db transparent;
+}
+
+.dark .scrollbar-thin {
+  scrollbar-color: #4b5563 transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+.dark .scrollbar-thin::-webkit-scrollbar-thumb {
+  background: #4b5563;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+.dark .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* ===== Landing redesign — microinteractions ===== */
+
+@keyframes sellf-savings-pulse {
+  0%, 100% { transform: scale(1); }
+  40% { transform: scale(1.06); }
+}
+
+.savings-pulse-active {
+  animation: sellf-savings-pulse 320ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .savings-pulse-active {
+    animation: none;
+  }
+}
+
+@keyframes sellf-tier-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.tier-shimmer {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.tier-shimmer::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 40%,
+    var(--sf-accent-soft) 50%,
+    transparent 60%
+  );
+  animation: sellf-tier-shimmer 3s linear infinite;
+  z-index: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tier-shimmer::before {
+    animation: none;
+    background: var(--sf-accent-soft);
+  }
+}
+
+/* ===== Landing redesign — killer demo animations ===== */
+
+@keyframes checkoutFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes otoSlideIn {
+  from { opacity: 0; transform: translateY(28px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes lineSlideIn {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes accentSweep {
+  0% { transform: translateX(-100%); opacity: 0.0; }
+  20% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { transform: translateX(100%); opacity: 0.0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[checkoutFadeIn_400ms_ease-out_both\],
+  .animate-\[checkoutFadeIn_300ms_ease-out_both\],
+  .animate-\[otoSlideIn_360ms_ease-out_both\],
+  .animate-\[lineSlideIn_320ms_ease-out_both\] {
+    animation: none !important;
+  }
+}

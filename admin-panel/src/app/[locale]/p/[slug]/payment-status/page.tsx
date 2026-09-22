@@ -1,0 +1,306 @@
+import { createClient } from '@/lib/supabase/server';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { redirect } from 'next/navigation';
+import PaymentStatusView from './components/PaymentStatusView';
+import { verifyPaymentSession, verifyPaymentIntent, OtoInfo, mapVerifiedPaymentToStatus } from '@/lib/payment/verify-payment';
+import { buildOtoRedirectUrl, buildSuccessRedirectUrl, hasHideBumpParam } from '@/lib/payment/oto-redirect';
+import { buildPostCheckoutMagicLinkRedirect } from '@/lib/auth/magic-link-redirect';
+import { sendTrustedMagicLink } from '@/lib/auth/magic-link/request';
+import { getSellfBaseUrl } from '@/lib/embed/checkout-embed';
+import { grantFreeProductAccess } from '@/lib/services/free-product-access';
+import { isSafeRedirectUrl } from '@/lib/validations/redirect';
+import { PaymentStatus } from './types';
+
+interface PageProps {
+  params: Promise<{ locale: string; slug: string }>;
+  searchParams: Promise<{
+    session_id?: string;
+    payment_intent?: string;
+    success_url?: string;
+  }>;
+}
+
+export default async function PaymentStatusPage({ params, searchParams }: PageProps) {
+  const resolvedParams = await params;
+  const resolvedSearchParams = await searchParams;
+
+  const { session_id, payment_intent } = resolvedSearchParams;
+  const isStripePayment = !!(session_id || payment_intent); // Has session_id or payment_intent = paid product
+
+  const supabase = await createClient();
+
+  // Get authenticated user (optional for guest purchases)
+  const { data: { user } } = await supabase.auth.getUser();
+  // For free products, user must be logged in
+  if (!isStripePayment && !user) {
+    redirect('/login');
+  }
+
+  // Get product details
+  const { data: product, error: productError } = await supabase
+    .from('products')
+    .select('id, name, slug, description, icon, price, currency, allow_custom_price, custom_price_min, success_redirect_url, pass_params_to_redirect')
+    .eq('slug', resolvedParams.slug)
+    .single();
+
+  if (productError || !product) {
+    redirect('/');
+  }
+
+  // Verify payment with Stripe and determine status
+  let accessGranted = false;
+  let errorMessage = '';
+  let paymentStatus: PaymentStatus = 'processing'; // processing, completed, failed, expired, guest_purchase, magic_link_sent
+  let customerEmail = '';
+  let userExistsInDatabase = false; // Track if user exists in database
+  let otoInfo: OtoInfo | undefined = undefined;
+
+  try {
+    if (isStripePayment && session_id) {
+      // Handle paid product with Stripe Checkout Session (embedded checkout flow)
+      const result = await verifyPaymentSession(session_id, user);
+      customerEmail = result.customer_email || '';
+
+      // Capture OTO info (both active and skipped)
+      if (result.oto_info?.has_oto || result.oto_info?.reason) {
+        otoInfo = result.oto_info;
+      }
+
+      // Check if user exists in database based on scenario
+      userExistsInDatabase = result.scenario === 'existing_user_email';
+
+      if (result.status === 'expired') {
+        paymentStatus = 'expired';
+        errorMessage = 'Payment session has expired. Please try again.';
+      } else if (result.status === 'complete' && result.payment_status === 'paid') {
+        const mapped = mapVerifiedPaymentToStatus(result);
+        paymentStatus = mapped.paymentStatus;
+        accessGranted = mapped.accessGranted;
+        errorMessage = mapped.errorMessage;
+      } else if (result.error) {
+        errorMessage = result.error;
+        paymentStatus = 'failed';
+      } else {
+        paymentStatus = 'processing';
+      }
+    } else if (isStripePayment && payment_intent) {
+      // Handle Payment Intent flow (custom payment form)
+      const result = await verifyPaymentIntent(payment_intent, user);
+      customerEmail = result.customer_email || '';
+
+      // Capture OTO info (both active and skipped)
+      if (result.oto_info?.has_oto || result.oto_info?.reason) {
+        otoInfo = result.oto_info;
+      }
+
+      // Check if user exists in database based on scenario
+      userExistsInDatabase = result.scenario === 'existing_user_email';
+
+      if (result.status === 'succeeded') {
+        const mapped = mapVerifiedPaymentToStatus(result);
+        paymentStatus = mapped.paymentStatus;
+        accessGranted = mapped.accessGranted;
+        errorMessage = mapped.errorMessage;
+      } else if (result.error) {
+        errorMessage = result.error;
+        paymentStatus = 'failed';
+      } else {
+        paymentStatus = 'processing';
+      }
+    } else {
+      // Handle free product (no session_id and no payment_intent) - user must be logged in
+      if (!user) {
+        redirect('/login');
+      }
+
+      customerEmail = user.email || '';
+
+      const { data: existingAccess } = await supabase
+        .from('user_product_access')
+        .select('access_expires_at')
+        .eq('user_id', user.id)
+        .eq('product_id', product.id)
+        .single();
+
+      const adminClient = createAdminClient();
+      const freeAccessResult = await grantFreeProductAccess(supabase, adminClient, {
+        product: { id: product.id, slug: resolvedParams.slug },
+        user: { id: user.id, email: customerEmail },
+      });
+
+      if (freeAccessResult.accessGranted) {
+        accessGranted = true;
+        paymentStatus = 'completed';
+        if (freeAccessResult.otoInfo) {
+          otoInfo = freeAccessResult.otoInfo as unknown as OtoInfo;
+        }
+      } else if (freeAccessResult.error?.includes('not be free or active')) {
+        paymentStatus = 'expired';
+        errorMessage = 'Your access has expired. Please purchase again.';
+      } else {
+        paymentStatus = 'failed';
+        errorMessage = 'Failed to grant access to free product';
+      }
+    }
+  } catch (err) {
+    console.error('[payment-status] Verification error:', err);
+    paymentStatus = 'failed';
+    errorMessage = 'An error occurred while verifying payment status';
+  }
+
+  // Calculate Funnel/OTO Redirect URL.
+  // OTO flow: when an active offer is present and the buyer doesn't already
+  // own the upsell product, we ALWAYS redirect server-side to the OTO
+  // checkout. The legacy interstitial offer card has been removed — the new
+  // 'oto' checkout template puts the countdown and the decline button on the
+  // upsell checkout page itself, so the buyer never sees a separate offer
+  // page (one fewer click + one fewer URL hop).
+  let finalRedirectUrl: string | undefined = undefined;
+
+  if ((accessGranted || paymentStatus === 'magic_link_sent') && otoInfo?.has_oto && otoInfo.oto_product_slug) {
+    // Skip the funnel entirely if the buyer already owns the upsell product.
+    let customerHasOtoAccess = false;
+
+    if (otoInfo.oto_product_id && customerEmail) {
+      const { data: existingUser } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', customerEmail)
+        .maybeSingle();
+
+      if (existingUser) {
+        const { data: existingOtoAccess } = await supabase
+          .from('user_product_access')
+          .select('id, access_expires_at')
+          .eq('user_id', existingUser.id)
+          .eq('product_id', otoInfo.oto_product_id)
+          .maybeSingle();
+
+        if (existingOtoAccess) {
+          const expiresAt = existingOtoAccess.access_expires_at
+            ? new Date(existingOtoAccess.access_expires_at)
+            : null;
+          customerHasOtoAccess = !expiresAt || expiresAt > new Date();
+        }
+      }
+    }
+
+    // Pull the buyer's full name from the source transaction so the upsell
+    // checkout pre-fills it. Profile lookup would also work for logged-in
+    // users, but reading from payment metadata covers guests too.
+    let customerName: string | undefined;
+    if (session_id || payment_intent) {
+      const txQuery = supabase
+        .from('payment_transactions')
+        .select('metadata')
+        .limit(1);
+      const { data: txRow } = session_id
+        ? await txQuery.eq('session_id', session_id).maybeSingle()
+        : await txQuery.eq('stripe_payment_intent_id', payment_intent!).maybeSingle();
+
+      const meta = (txRow?.metadata ?? {}) as Record<string, unknown>;
+      const nameFromMeta = typeof meta.full_name === 'string' && meta.full_name.trim().length > 0
+        ? meta.full_name
+        : typeof meta.fullName === 'string' && meta.fullName.trim().length > 0
+          ? meta.fullName
+          : undefined;
+      customerName = nameFromMeta;
+    }
+
+    if (!customerHasOtoAccess) {
+      const otoRedirect = buildOtoRedirectUrl({
+        locale: resolvedParams.locale,
+        otoProductSlug: otoInfo.oto_product_slug!,
+        customerEmail: customerEmail || undefined,
+        customerName,
+        couponCode: otoInfo.coupon_code,
+        baseUrl: process.env.SITE_URL || process.env.NEXT_PUBLIC_BASE_URL,
+        hideBump: hasHideBumpParam(product.success_redirect_url),
+        passParams: product.pass_params_to_redirect || false,
+        sourceProductId: product.id,
+        sessionId: session_id,
+        downsellCouponCode: otoInfo.downsell_code,
+        downsellProductSlug: otoInfo.downsell_product_slug,
+      });
+
+      if (!otoRedirect.hasAllRequiredParams) {
+        console.warn('OTO Redirect missing params:', otoRedirect.missingParams, '- OTO countdown may not work');
+      }
+
+      // Guest gets magic link sent server-side before we redirect into the funnel.
+      // Trusted path: paymentStatus === 'magic_link_sent' is only reached after
+      // verify-payment confirmed the Stripe session/intent, so no additional
+      // captcha check is needed here — still per-email rate limited, since this
+      // page can be reloaded any number of times with the same session_id.
+      if (paymentStatus === 'magic_link_sent' && customerEmail) {
+        const magicResult = await sendTrustedMagicLink({
+          email: customerEmail,
+          redirectTo: buildPostCheckoutMagicLinkRedirect({
+            origin: getSellfBaseUrl(),
+            productSlug: product.slug,
+            sessionId: session_id,
+            paymentIntentId: payment_intent,
+          }),
+        });
+        if (!magicResult.ok) {
+          console.error('[payment-status] Magic link send failed pre-OTO, code:', magicResult.code);
+        }
+      }
+
+      redirect(otoRedirect.url);
+    }
+  }
+
+  // Redirect logic:
+  // 1. OTO active -> handled above via redirect()
+  // 2. OTO skipped (user owns product) -> NO redirect
+  // 3. No OTO -> use success_redirect_url
+
+  // Include magic_link_sent as a success scenario (guest purchase)
+  const isSuccessfulPayment = (accessGranted && paymentStatus === 'completed') || paymentStatus === 'magic_link_sent';
+
+  if (isSuccessfulPayment) {
+    // Check if OTO was configured but skipped (user already owns the product)
+    const otoWasSkipped = otoInfo?.reason === 'already_owns_oto_product';
+
+    if (otoWasSkipped) {
+      // OTO was skipped (user owns product) - no redirect
+    } else {
+      let overrideRedirectUrl = resolvedSearchParams.success_url;
+      if (overrideRedirectUrl) {
+        const decoded = decodeURIComponent(overrideRedirectUrl).trim();
+        if (!isSafeRedirectUrl(decoded)) {
+          overrideRedirectUrl = undefined;
+        }
+      }
+      const targetUrl = overrideRedirectUrl || product.success_redirect_url;
+
+      if (targetUrl) {
+        const redirectResult = buildSuccessRedirectUrl({
+          targetUrl,
+          baseUrl: process.env.SITE_URL || process.env.NEXT_PUBLIC_BASE_URL,
+          passParams: product.pass_params_to_redirect || false,
+          customerEmail: customerEmail || undefined,
+          productId: product.id,
+          sessionId: session_id,
+          additionalParams: resolvedSearchParams as Record<string, string | undefined>
+        });
+
+        finalRedirectUrl = redirectResult.url;
+      }
+    }
+  }
+
+  return (
+    <PaymentStatusView
+      product={product}
+      accessGranted={accessGranted}
+      paymentStatus={paymentStatus}
+      errorMessage={errorMessage}
+      customerEmail={customerEmail}
+      sessionId={session_id}
+      paymentIntentId={payment_intent}
+      redirectUrl={finalRedirectUrl}
+    />
+  );
+}

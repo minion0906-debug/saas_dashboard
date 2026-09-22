@@ -1,0 +1,637 @@
+{
+  "name": "Sellf: Zakup → faktura wFirma",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -400
+      ],
+      "parameters": {
+        "color": 1,
+        "width": 700,
+        "height": 440,
+        "content": "## Wystawiaj fakturę w wFirmie za każdy zakup B2B w Sellfie\n\n### Jak to działa\n[Sellf](https://github.com/jurczykpawel/sellf) - self-hostowana platforma checkout dla produktów cyfrowych - wysyła podpisany webhook `purchase.completed` dla każdego opłaconego zamówienia. Ten workflow weryfikuje nagłówek HMAC `X-Sellf-Signature`, przepuszcza tylko zakupy z żądaniem faktury i NIP-em, przelicza brutto na netto dla Twojej stawki VAT, mapuje zamówienie na fakturę wFirmy oznaczoną jako opłaconą i wystawia ją przez API. Sukces i błąd lądują w osobnych nodach końcowych - nieudana faktura nigdy nie przechodzi niezauważona.\n\n### Konfiguracja\n1. W adminie Sellfa otwórz **Settings → Webhooks**, dodaj endpoint z adresem Production URL tego workflowa i skopiuj signing secret.\n2. W wFirmie utwórz token API (Ustawienia → API).\n3. Uzupełnij **Configuration (EDIT ME)**: sekret webhooka, token wFirmy, stawkę VAT.\n4. Czerwona notka przy **Verify Signature** opisuje jedno wymagane ustawienie n8n, potem aktywuj.\n\n### Możliwości modyfikacji\nZmień stawkę VAT w **Configuration** (przeliczenie netto pójdzie samo). Podepnij **Log Error** do Slacka albo maila, żeby nieudana faktura pingowała od razu."
+      }
+    },
+    {
+      "id": "sticky-receive",
+      "name": "Section: Receive & Verify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 1120,
+        "height": 380,
+        "content": "## Odbiór i weryfikacja\nPrzyjmuje webhook Sellfa i sprawdza podpis HMAC, zanim zaufa danym."
+      }
+    },
+    {
+      "id": "sticky-extract",
+      "name": "Section: Acknowledge & Extract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        440,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 220,
+        "content": "## Potwierdzenie i ekstrakcja\nOdpowiada od razu, potem filtruje opłacone zakupy z żądaniem faktury i NIP-em."
+      }
+    },
+    {
+      "id": "sticky-build",
+      "name": "Section: Build the Invoice",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 520,
+        "height": 220,
+        "content": "## Budowa faktury\nPrzelicza brutto na netto dla Twojej stawki VAT i mapuje zamówienie na payload wFirmy."
+      }
+    },
+    {
+      "id": "sticky-send",
+      "name": "Section: Send & Log Result",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1940,
+        180
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 540,
+        "content": "## Wysyłka i log wyniku\nTworzy fakturę i zapisuje wynik - albo błąd, żeby nic nie padło po cichu."
+      }
+    },
+    {
+      "id": "sticky-crypto",
+      "name": "Warning: crypto module",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -130,
+        370
+      ],
+      "parameters": {
+        "color": 3,
+        "width": 260,
+        "height": 160,
+        "content": "## Wymagane ustawienie\nTen node Code potrzebuje `require('crypto')`. Self-hosted n8n: ustaw `NODE_FUNCTION_ALLOW_BUILTIN=crypto` w środowisku n8n i zrestartuj."
+      }
+    },
+    {
+      "id": "webhook-1",
+      "name": "Sellf Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -700,
+        400
+      ],
+      "parameters": {
+        "path": "sellf-purchase-wfirma",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "notes": "Paste this node's Production URL into Sellf admin -> Settings -> Webhooks -> Add endpoint.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "config-1",
+      "name": "Configuration (EDIT ME)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -400,
+        400
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "webhookSecret",
+              "value": "paste-the-endpoint-signing-secret",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "wfirmaApiToken",
+              "value": "paste-your-wfirma-api-token",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "vatRate",
+              "value": 23,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {
+          "stripBinary": false
+        }
+      },
+      "notes": "wfirmaApiToken from wFirma -> Settings -> API. webhookSecret from Sellf admin -> Settings -> Webhooks."
+    },
+    {
+      "id": "verify-1",
+      "name": "Verify Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst config = $('Configuration (EDIT ME)').first().json;\nconst item = $input.first();\n\nconst header = (item.json.headers && item.json.headers['x-sellf-signature']) || '';\nconst rawBody = item.binary && item.binary.data\n  ? Buffer.from(item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify(item.json.body || {});\n\n// Header format (Stripe/Svix style): t=<unix>,v1=<hex>[,v1=<hex2 during secret rotation>]\nlet t = null;\nconst sigs = [];\nfor (const part of header.split(',')) {\n  const eq = part.indexOf('=');\n  if (eq === -1) continue;\n  const key = part.slice(0, eq).trim();\n  const value = part.slice(eq + 1).trim();\n  if (key === 't') t = value;\n  else if (key === 'v1') sigs.push(value);\n}\n\nlet valid = false;\nif (t && sigs.length && config.webhookSecret) {\n  const expected = crypto.createHmac('sha256', config.webhookSecret).update(`${t}.${rawBody}`).digest('hex');\n  const withinTolerance = Math.abs(Math.floor(Date.now() / 1000) - Number(t)) <= 300;\n  valid = withinTolerance && sigs.some((v1) =>\n    v1.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)));\n}\n\nreturn [{ json: { valid, body: JSON.parse(rawBody) } }];"
+      }
+    },
+    {
+      "id": "if-valid",
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-401",
+      "name": "Respond Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        560
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"success\":false,\"error\":\"invalid signature\"}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        400
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"ok\"}"
+      },
+      "notes": "Acknowledge before processing - Sellf retries deliveries that don't get a 2xx."
+    },
+    {
+      "id": "switch-1",
+      "name": "Is Purchase?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        800,
+        400
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "purchase.completed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "purchase.completed"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "notes": "Only purchase.completed flows through - other events (and Sellf's test deliveries) are dropped."
+    },
+    {
+      "id": "extract-1",
+      "name": "Extract Purchase Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json.body.data;\n\nreturn [{\n  json: {\n    email: data.customer.email,\n    firstName: data.customer.firstName || '',\n    lastName: data.customer.lastName || '',\n    productName: data.product.name,\n    amount: data.order.amount / 100,\n    currency: (data.order.currency || 'PLN').toUpperCase(),\n    sessionId: data.order.sessionId,\n    paymentIntentId: data.order.paymentIntentId,\n    needsInvoice: (data.invoice && data.invoice.needsInvoice) || false,\n    invoiceNip: (data.invoice && data.invoice.nip) || null,\n    invoiceCompany: (data.invoice && data.invoice.companyName) || null,\n    invoiceAddress: (data.invoice && data.invoice.address) || null,\n    invoiceCity: (data.invoice && data.invoice.city) || null,\n    invoicePostalCode: (data.invoice && data.invoice.postalCode) || null,\n    invoiceCountry: (data.invoice && data.invoice.country) || 'PL'\n  }\n}];"
+      }
+    },
+    {
+      "id": "switch-2",
+      "name": "Needs Invoice?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1400,
+        400
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.needsInvoice === true && !!$json.invoiceNip }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "invoice requested"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "notes": "Consumer purchases without invoice data are dropped - only B2B buyers who asked for an invoice flow through."
+    },
+    {
+      "id": "build-1",
+      "name": "Build wFirma Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const config = $('Configuration (EDIT ME)').first().json;\nconst d = $input.first().json;\nconst today = new Date().toISOString().split('T')[0];\n\nconst vatRate = String(config.vatRate) + '%';\nconst vatMultiplier = 1 + (Number(config.vatRate) / 100);\nconst netPrice = Math.round((d.amount / vatMultiplier) * 100) / 100;\n\nconst buyerName = d.invoiceCompany || `${d.firstName} ${d.lastName}`.trim() || d.email;\n\nconst payload = {\n  invoices: {\n    invoice: {\n      paymentmethod: 'transfer',\n      paymentdate: today,\n      type: 'normal',\n      status: 'paid',\n      alreadypaid: d.amount,\n      currency: d.currency || 'PLN',\n      buyer: {\n        name: buyerName,\n        nip: d.invoiceNip,\n        street: d.invoiceAddress || '',\n        zip: d.invoicePostalCode || '',\n        city: d.invoiceCity || '',\n        country: d.invoiceCountry || 'PL',\n        email: d.email\n      },\n      invoicecontents: {\n        invoicecontent: [{\n          name: d.productName,\n          unit: 'szt.',\n          count: 1,\n          price: netPrice,\n          vat_rate: vatRate\n        }]\n      }\n    }\n  }\n};\n\nreturn [{ json: { _body: JSON.stringify(payload) } }];"
+      }
+    },
+    {
+      "id": "send-1",
+      "name": "Send to wFirma",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api2.wfirma.pl/invoices/add",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Configuration (EDIT ME)').item.json.wfirmaApiToken }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "={{ $json._body }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "if-success",
+      "name": "Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2300,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ !!($json.invoices && $json.invoices.invoice && $json.invoices.invoice.id) }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "set-ok",
+      "name": "Extract Invoice Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2600,
+        240
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r1",
+              "name": "invoiceId",
+              "value": "={{ $json.invoices && $json.invoices.invoice && $json.invoices.invoice.id }}",
+              "type": "string"
+            },
+            {
+              "id": "r2",
+              "name": "buyerEmail",
+              "value": "={{ $('Extract Purchase Data').item.json.email }}",
+              "type": "string"
+            },
+            {
+              "id": "r3",
+              "name": "sessionId",
+              "value": "={{ $('Extract Purchase Data').item.json.sessionId }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "The created wFirma invoice - wire this to your DB, a sheet or a notification."
+    },
+    {
+      "id": "set-err",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2600,
+        560
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "error",
+              "value": "={{ JSON.stringify($json).slice(0, 500) }}",
+              "type": "string"
+            },
+            {
+              "id": "e2",
+              "name": "sessionId",
+              "value": "={{ $('Extract Purchase Data').item.json.sessionId }}",
+              "type": "string"
+            },
+            {
+              "id": "e3",
+              "name": "buyerEmail",
+              "value": "={{ $('Extract Purchase Data').item.json.email }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Connect to Slack, email or a sheet so a failed invoice never goes unnoticed."
+    }
+  ],
+  "connections": {
+    "Sellf Webhook": {
+      "main": [
+        [
+          {
+            "node": "Configuration (EDIT ME)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration (EDIT ME)": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature": {
+      "main": [
+        [
+          {
+            "node": "Signature Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature Valid?": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond OK": {
+      "main": [
+        [
+          {
+            "node": "Is Purchase?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Purchase?": {
+      "main": [
+        [
+          {
+            "node": "Extract Purchase Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Purchase Data": {
+      "main": [
+        [
+          {
+            "node": "Needs Invoice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Invoice?": {
+      "main": [
+        [
+          {
+            "node": "Build wFirma Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build wFirma Payload": {
+      "main": [
+        [
+          {
+            "node": "Send to wFirma",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to wFirma": {
+      "main": [
+        [
+          {
+            "node": "Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Success?": {
+      "main": [
+        [
+          {
+            "node": "Extract Invoice Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "sellf"
+  }
+}

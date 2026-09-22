@@ -1,0 +1,58 @@
+meta {
+  name: List Products
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{BASE_URL}}/api/v1/products
+  body: none
+  auth: bearer
+}
+
+params:query {
+  ~status: active
+  ~search:
+  ~cursor:
+  ~limit: 20
+  ~sort_by: created_at
+  ~sort_order: desc
+}
+
+auth:bearer {
+  token: {{API_KEY}}
+}
+
+script:post-response {
+  const body = res.getBody();
+  const nextCursor = body?.pagination?.next_cursor;
+  if (nextCursor) {
+    bru.setVar("products_next_cursor", nextCursor);
+  } else {
+    bru.setVar("products_next_cursor", "");
+  }
+}
+
+docs {
+  # List Products
+
+  Returns cursor-paginated list of products.
+
+  After the request, `products_next_cursor` is automatically saved
+  to a collection variable. Use "List Products - Next Page" to fetch
+  the next page.
+
+  ## Query Parameters
+  - `status`: active | inactive | all (default: all)
+  - `search`: search by name or description
+  - `cursor`: pagination cursor from previous response
+  - `limit`: items per page, max 100 (default: 20)
+  - `sort_by`: created_at | name | price | updated_at (default: created_at)
+  - `sort_order`: asc | desc (default: desc)
+
+  ## Response
+  Returns `data[]` with pagination metadata:
+  - `next_cursor`: cursor for next page (null if no more)
+  - `has_more`: boolean
+  - `total`: total count matching current filters
+}

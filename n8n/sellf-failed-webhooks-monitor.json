@@ -1,0 +1,284 @@
+{
+  "name": "Sellf: Failed Webhook Monitor + Auto-Retry",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -400
+      ],
+      "parameters": {
+        "color": 1,
+        "width": 700,
+        "height": 440,
+        "content": "## Monitor failed Sellf webhook deliveries and auto-retry them\n\n### How it works\nWebhooks fail quietly - a receiver was down for a minute and your invoice/CRM automation silently missed a sale. Every hour this workflow lists your [Sellf](https://github.com/jurczykpawel/sellf) - a self-hosted checkout platform for digital products webhook endpoints, pulls each one's failed delivery logs, alerts you on Telegram with the endpoint and the failed events, and immediately queues a retry for up to five failed deliveries per endpoint through the Sellf API. Self-healing plumbing for everything else you've built on Sellf webhooks.\n\n### Setup\n1. In Sellf admin create an API key (**Settings → API keys**) with the webhooks scopes.\n2. Fill in **Configuration (EDIT ME)**: your Sellf URL, the API key and your Telegram chat id.\n3. Connect your Telegram bot credentials on **Alert on Telegram**.\n4. Activate.\n\n### Customization tips\nRaise the retry cap in **Split Log IDs** (5 per endpoint per run by default). Don't want auto-retries? Delete the retry branch and keep the alerts. Swap Telegram for Slack/Discord via an incoming-webhook HTTP node."
+      }
+    },
+    {
+      "id": "sticky-scan",
+      "name": "Section: Scan Deliveries",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 220,
+        "content": "## Scan Deliveries\nHourly: one API call lists every failed webhook delivery across all endpoints."
+      }
+    },
+    {
+      "id": "sticky-act",
+      "name": "Section: Alert & Retry",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        140,
+        180
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 540,
+        "content": "## Alert & Retry\nYou get the failure summary on Telegram while the workflow queues retries for up to 5 deliveries per endpoint."
+      }
+    },
+    {
+      "id": "trigger-1",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -700,
+        400
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "config-1",
+      "name": "Configuration (EDIT ME)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -400,
+        400
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "sellfUrl",
+              "value": "https://your-sellf.example.com",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "apiKey",
+              "value": "paste-your-sellf-api-key",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "telegramChatId",
+              "value": "your-telegram-chat-id",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {
+          "stripBinary": false
+        }
+      },
+      "notes": "apiKey from Sellf admin -> Settings -> API keys."
+    },
+    {
+      "id": "http-2",
+      "name": "Get Failed Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -100,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration (EDIT ME)').item.json.sellfUrl }}/api/v1/webhooks/logs?status=failed&limit=50",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Configuration (EDIT ME)').item.json.apiKey }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notes": "One call lists failed deliveries across all endpoints."
+    },
+    {
+      "id": "code-2",
+      "name": "Check for Failures",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const config = $('Configuration (EDIT ME)').first().json;\nconst baseUrl = String(config.sellfUrl || '').replace(/\\/+$/, '');\nconst logs = ($input.first().json.data) || [];\nif (!Array.isArray(logs) || logs.length === 0) return [];\n\nconst byEndpoint = new Map();\nfor (const l of logs) {\n  const key = l.endpoint_id || 'unknown';\n  const agg = byEndpoint.get(key) || { lines: [], retries: [] };\n  agg.lines.push(`\\u2022 ${l.event_type || 'unknown'} @ ${l.created_at || ''} (${l.http_status || 'timeout'})`);\n  agg.retries.push({ retryUrl: `${baseUrl}/api/v1/webhooks/logs/${l.id}/retry` });\n  byEndpoint.set(key, agg);\n}\n\nreturn [...byEndpoint.entries()].map(([endpointId, agg]) => ({ json: {\n  endpointId,\n  failedCount: agg.lines.length,\n  retries: agg.retries.slice(0, 5),\n  alertMessage: `\\u{1F534} *${agg.lines.length} failed webhook delivery(ies)*\\nEndpoint: ${endpointId}\\n\\n${agg.lines.slice(0, 5).join('\\n')}`,\n} }));"
+      },
+      "notes": "Groups failures per endpoint - nothing fails, nothing flows."
+    },
+    {
+      "id": "tg-1",
+      "name": "Alert on Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        500,
+        240
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Configuration (EDIT ME)').item.json.telegramChatId }}",
+        "text": "={{ $json.alertMessage }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "notes": "Connect your Telegram bot credentials. Prefer Slack/Discord? Swap for an HTTP node posting to an incoming webhook."
+    },
+    {
+      "id": "code-3",
+      "name": "Split Log IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        560
+      ],
+      "parameters": {
+        "jsCode": "const out = [];\nfor (const item of $input.all()) {\n  for (const r of (item.json.retries || [])) out.push({ json: r });\n}\nreturn out;"
+      },
+      "notes": "Cap: 5 retries per endpoint per run - raise it here if you need more."
+    },
+    {
+      "id": "http-3",
+      "name": "Retry Failed Delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.retryUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Configuration (EDIT ME)').item.json.apiKey }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notes": "Queues the delivery for a fresh attempt through Sellf's own retry pipeline."
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [
+        [
+          {
+            "node": "Configuration (EDIT ME)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration (EDIT ME)": {
+      "main": [
+        [
+          {
+            "node": "Get Failed Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Failed Logs": {
+      "main": [
+        [
+          {
+            "node": "Check for Failures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Failures": {
+      "main": [
+        [
+          {
+            "node": "Alert on Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Log IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Log IDs": {
+      "main": [
+        [
+          {
+            "node": "Retry Failed Delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "sellf"
+  }
+}

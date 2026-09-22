@@ -1,0 +1,112 @@
+/**
+ * Integrations validation utilities
+ * Pure TypeScript validation
+ */
+
+import {
+  CONVERSION_TRACKING_MODES,
+  type ConversionTrackingMode,
+} from '@/lib/tracking/consent-mode';
+
+export interface ValidationResult {
+  isValid: boolean;
+  errors: Record<string, string[]>;
+}
+
+export interface IntegrationsInput {
+  gtm_container_id?: string | null;
+  gtm_server_container_url?: string | null;
+  gtm_ss_enabled?: boolean;
+  google_ads_conversion_id?: string | null;
+  google_ads_conversion_label?: string | null;
+  facebook_pixel_id?: string | null;
+  facebook_capi_token?: string | null;
+  facebook_test_event_code?: string | null;
+  fb_capi_enabled?: boolean;
+  conversion_tracking_mode?: ConversionTrackingMode;
+  umami_website_id?: string | null;
+  umami_script_url?: string | null;
+  cookie_consent_enabled?: boolean;
+  consent_logging_enabled?: boolean;
+  sellf_license?: string | null;
+}
+
+/**
+ * Tracking-script source URLs are interpolated into client-side <Script> tags.
+ * Validate strictly at the persistence boundary so anything that could break
+ * out of an attribute or inline-JS string context is rejected up front.
+ */
+function isValidTrackingUrl(url: string, allowHttp: boolean): boolean {
+  if (/[\s'"`<>\\]/.test(url)) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' && !(allowHttp && parsed.protocol === 'http:')) return false;
+    if (parsed.username || parsed.password) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function validateIntegrations(data: IntegrationsInput): ValidationResult {
+  const errors: Record<string, string[]> = {};
+
+  const addError = (field: string, message: string) => {
+    if (!errors[field]) errors[field] = [];
+    errors[field].push(message);
+  };
+
+  // GTM ID validation
+  if (data.gtm_container_id && !/^GTM-[A-Z0-9]+$/.test(data.gtm_container_id)) {
+    addError('gtm_container_id', 'Invalid GTM Container ID format');
+  }
+
+  // GTM Server Container URL validation
+  if (data.gtm_server_container_url && !isValidTrackingUrl(data.gtm_server_container_url, false)) {
+    addError('gtm_server_container_url', 'GTM Server URL must be a valid HTTPS URL');
+  }
+
+  // Umami validation
+  if (data.umami_website_id && !/^[0-9a-fA-F-]{36}$/.test(data.umami_website_id)) {
+    addError('umami_website_id', 'Invalid Website ID (must be a UUID)');
+  }
+
+  if (data.umami_script_url && !isValidTrackingUrl(data.umami_script_url, true)) {
+    addError('umami_script_url', 'Invalid Script URL');
+  }
+
+  // Google Ads ID
+  if (data.google_ads_conversion_id && !/^AW-[0-9]+$/.test(data.google_ads_conversion_id)) {
+    addError('google_ads_conversion_id', 'Invalid Google Ads ID format');
+  }
+
+  // FB Pixel
+  if (data.facebook_pixel_id && !/^[0-9]+$/.test(data.facebook_pixel_id)) {
+    addError('facebook_pixel_id', 'Facebook Pixel ID must be numeric');
+  }
+
+  if (data.facebook_capi_token && (data.facebook_capi_token.length < 20 || data.facebook_capi_token.length > 4096)) {
+    addError('facebook_capi_token', 'Facebook CAPI token must be between 20 and 4096 characters');
+  }
+
+  if (data.facebook_test_event_code && data.facebook_test_event_code.length > 100) {
+    addError('facebook_test_event_code', 'Facebook test event code must be 100 characters or less');
+  }
+
+  if (
+    data.conversion_tracking_mode !== undefined &&
+    !CONVERSION_TRACKING_MODES.includes(data.conversion_tracking_mode)
+  ) {
+    addError('conversion_tracking_mode', 'Invalid conversion tracking mode');
+  }
+
+  if (data.google_ads_conversion_label && data.google_ads_conversion_label.length > 200) {
+    addError('google_ads_conversion_label', 'Google Ads conversion label must be 200 characters or less');
+  }
+
+  if (data.sellf_license && !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(data.sellf_license)) {
+    addError('sellf_license', 'Invalid license token format');
+  }
+
+  return { isValid: Object.keys(errors).length === 0, errors };
+}

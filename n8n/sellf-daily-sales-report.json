@@ -1,0 +1,262 @@
+{
+  "name": "Sellf: Daily Sales Report → Telegram",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -380
+      ],
+      "parameters": {
+        "color": 1,
+        "width": 700,
+        "height": 400,
+        "content": "## Get a daily Sellf sales report on Telegram\n\n### How it works\nEvery morning at 9:00 this workflow pulls your shop's numbers from the [Sellf](https://github.com/jurczykpawel/sellf) - a self-hosted checkout platform for digital products REST API - today's revenue and orders, active users and products, plus the top five products by revenue - formats them into one tidy Telegram message and sends it to your chat. Your daily pulse without opening the admin panel.\n\n### Setup\n1. In Sellf admin create an API key (**Settings → API keys**) with the analytics read scope.\n2. Fill in **Configuration (EDIT ME)**: your Sellf URL, the API key and your Telegram chat id.\n3. Connect your Telegram bot credentials on **Send to Telegram** (create a bot with @BotFather, add it to your chat).\n4. Adjust the hour on **Every Day at 9:00** and activate.\n\n### Customization tips\nEdit **Format Report** to add refund counts, conversion rates or week-over-week deltas - everything the analytics endpoints return is available. Prefer Slack or Discord? Swap the Telegram node for an HTTP node posting to an incoming webhook."
+      }
+    },
+    {
+      "id": "sticky-pull",
+      "name": "Section: Pull the Numbers",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 1120,
+        "height": 220,
+        "content": "## Pull the Numbers\nRuns every morning and reads today's stats and top products from the Sellf API."
+      }
+    },
+    {
+      "id": "sticky-report",
+      "name": "Section: Report",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        440,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 220,
+        "content": "## Report\nOne readable Telegram message: revenue, orders, users, products, top sellers."
+      }
+    },
+    {
+      "id": "trigger-1",
+      "name": "Every Day at 9:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -700,
+        400
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "config-1",
+      "name": "Configuration (EDIT ME)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -400,
+        400
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "sellfUrl",
+              "value": "https://your-sellf.example.com",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "apiKey",
+              "value": "paste-your-sellf-api-key",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "telegramChatId",
+              "value": "your-telegram-chat-id",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {
+          "stripBinary": false
+        }
+      },
+      "notes": "apiKey from Sellf admin -> Settings -> API keys. telegramChatId: message @userinfobot on Telegram to find yours."
+    },
+    {
+      "id": "http-1",
+      "name": "Get Dashboard Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -100,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration (EDIT ME)').item.json.sellfUrl }}/api/v1/analytics/dashboard",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Configuration (EDIT ME)').item.json.apiKey }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "http-2",
+      "name": "Get Top Products",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        400
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Configuration (EDIT ME)').item.json.sellfUrl }}/api/v1/analytics/top-products?period=day&sort_by=revenue&limit=5",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Configuration (EDIT ME)').item.json.apiKey }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "code-1",
+      "name": "Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const dashboard = $('Get Dashboard Stats').first().json;\nconst topProducts = $('Get Top Products').first().json;\n\nconst s = dashboard.data || dashboard;\nconst products = ((topProducts.data && topProducts.data.products) || topProducts.products || []).slice(0, 5);\n\nconst topList = products.length > 0\n  ? products.map((p, i) => `  ${i+1}. ${p.name || p.product_name} - ${p.revenue || p.total_revenue || 0}`).join('\\n')\n  : '  No sales yet';\n\nconst msg = `\\u{1F4CA} *Sellf Daily Report*\\n` +\n  `\\u{1F4C5} ${new Date().toISOString().split('T')[0]}\\n\\n` +\n  `\\u{1F4B0} Revenue today: *${(s.revenue && s.revenue.today) || 0}*\\n` +\n  `\\u{1F6D2} Orders today: *${(s.transactions && s.transactions.today) || 0}*\\n` +\n  `\\u{1F465} Users with access: *${(s.users && s.users.with_access) || 0}*\\n` +\n  `\\u{1F4E6} Active products: *${(s.products && s.products.active) || 0}*\\n` +\n  `\\u21A9\\uFE0F Pending refunds: *${(s.refunds && s.refunds.pending_count) || 0}*\\n\\n` +\n  `\\u{1F3C6} *Top products (today):*\\n${topList}`;\n\nreturn [{ json: { message: msg } }];"
+      }
+    },
+    {
+      "id": "tg-1",
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        800,
+        400
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Configuration (EDIT ME)').item.json.telegramChatId }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "notes": "Connect your Telegram bot credentials. Prefer Slack/Discord? Swap for an HTTP node posting to an incoming webhook."
+    }
+  ],
+  "connections": {
+    "Every Day at 9:00": {
+      "main": [
+        [
+          {
+            "node": "Configuration (EDIT ME)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration (EDIT ME)": {
+      "main": [
+        [
+          {
+            "node": "Get Dashboard Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Dashboard Stats": {
+      "main": [
+        [
+          {
+            "node": "Get Top Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Top Products": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "sellf"
+  }
+}

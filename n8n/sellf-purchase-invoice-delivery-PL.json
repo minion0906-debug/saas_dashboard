@@ -1,0 +1,532 @@
+{
+  "name": "Sellf: Zakup → faktura + mail z podziękowaniem",
+  "nodes": [
+    {
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        -400
+      ],
+      "parameters": {
+        "color": 1,
+        "width": 700,
+        "height": 460,
+        "content": "## Wysyłaj mail z podziękowaniem i fakturą za każdy zakup w Sellfie\n\n### Jak to działa\n[Sellf](https://github.com/jurczykpawel/sellf) - self-hostowana platforma checkout dla produktów cyfrowych - wysyła podpisany webhook `purchase.completed` dla każdego opłaconego zamówienia. Ten workflow weryfikuje nagłówek HMAC `X-Sellf-Signature` i dzieli kupujących na dwie ścieżki: B2B (żądanie faktury + NIP) najpierw dostaje fakturę VAT w Fakturowni, potem mail z podziękowaniem; konsument dostaje mail od razu. Jeden workflow domyka cały moment po zakupie: potwierdzenie, podsumowanie i papierologię.\n\n### Konfiguracja\n1. W adminie Sellfa otwórz **Settings → Webhooks**, dodaj endpoint z adresem Production URL tego workflowa i skopiuj signing secret.\n2. W Fakturowni weź nazwę konta (subdomenę) i token API.\n3. Uzupełnij **Configuration (EDIT ME)**: sekret webhooka, konto + token Fakturowni, VAT i adres nadawcy.\n4. Podłącz SMTP w **Send Thank-you Email** i przepisz treść po swojemu.\n5. Czerwona notka przy **Verify Signature** opisuje jedno wymagane ustawienie n8n, potem aktywuj.\n\n### Możliwości modyfikacji\nUżywasz iFirmy albo wFirmy? Weź odpowiedni szablon Sellfa i wstaw jego parę build/send zamiast node'a Fakturowni. Sellf sam dostarcza produkt - ten mail to Twoje osobiste podziękowanie, nie delivery."
+      }
+    },
+    {
+      "id": "sticky-receive",
+      "name": "Section: Receive & Verify",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -760,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 1120,
+        "height": 380,
+        "content": "## Odbiór i weryfikacja\nPrzyjmuje webhook Sellfa i sprawdza podpis HMAC, zanim zaufa danym."
+      }
+    },
+    {
+      "id": "sticky-extract",
+      "name": "Section: Acknowledge & Extract",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        440,
+        340
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 820,
+        "height": 220,
+        "content": "## Potwierdzenie i ekstrakcja\nOdpowiada od razu, potem filtruje opłacone zakupy z żądaniem faktury i NIP-em."
+      }
+    },
+    {
+      "id": "sticky-invoice",
+      "name": "Section: Invoice & Thank-you",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        180
+      ],
+      "parameters": {
+        "color": 7,
+        "width": 1120,
+        "height": 540,
+        "content": "## Faktura i podziękowanie\nB2B najpierw dostaje fakturę; każdy dostaje mail z podziękowaniem."
+      }
+    },
+    {
+      "id": "sticky-crypto",
+      "name": "Warning: crypto module",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -130,
+        370
+      ],
+      "parameters": {
+        "color": 3,
+        "width": 260,
+        "height": 160,
+        "content": "## Wymagane ustawienie\nTen node Code potrzebuje `require('crypto')`. Self-hosted n8n: ustaw `NODE_FUNCTION_ALLOW_BUILTIN=crypto` w środowisku n8n i zrestartuj."
+      }
+    },
+    {
+      "id": "webhook-1",
+      "name": "Sellf Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -700,
+        400
+      ],
+      "parameters": {
+        "path": "sellf-purchase-thanks",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "notes": "Paste this node's Production URL into Sellf admin -> Settings -> Webhooks -> Add endpoint.",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "config-1",
+      "name": "Configuration (EDIT ME)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -400,
+        400
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "webhookSecret",
+              "value": "paste-the-endpoint-signing-secret",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "fakturowniaAccount",
+              "value": "your-account-subdomain",
+              "type": "string"
+            },
+            {
+              "id": "a3",
+              "name": "fakturowniaApiToken",
+              "value": "paste-your-fakturownia-api-token",
+              "type": "string"
+            },
+            {
+              "id": "a4",
+              "name": "vatRate",
+              "value": 23,
+              "type": "number"
+            },
+            {
+              "id": "a5",
+              "name": "fromEmail",
+              "value": "you@your-brand.example.com",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {
+          "stripBinary": false
+        }
+      },
+      "notes": "webhookSecret from Sellf admin -> Settings -> Webhooks. fakturowniaAccount = your panel subdomain."
+    },
+    {
+      "id": "verify-1",
+      "name": "Verify Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst config = $('Configuration (EDIT ME)').first().json;\nconst item = $input.first();\n\nconst header = (item.json.headers && item.json.headers['x-sellf-signature']) || '';\nconst rawBody = item.binary && item.binary.data\n  ? Buffer.from(item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify(item.json.body || {});\n\n// Header format (Stripe/Svix style): t=<unix>,v1=<hex>[,v1=<hex2 during secret rotation>]\nlet t = null;\nconst sigs = [];\nfor (const part of header.split(',')) {\n  const eq = part.indexOf('=');\n  if (eq === -1) continue;\n  const key = part.slice(0, eq).trim();\n  const value = part.slice(eq + 1).trim();\n  if (key === 't') t = value;\n  else if (key === 'v1') sigs.push(value);\n}\n\nlet valid = false;\nif (t && sigs.length && config.webhookSecret) {\n  const expected = crypto.createHmac('sha256', config.webhookSecret).update(`${t}.${rawBody}`).digest('hex');\n  const withinTolerance = Math.abs(Math.floor(Date.now() / 1000) - Number(t)) <= 300;\n  valid = withinTolerance && sigs.some((v1) =>\n    v1.length === expected.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)));\n}\n\nreturn [{ json: { valid, body: JSON.parse(rawBody) } }];"
+      }
+    },
+    {
+      "id": "if-valid",
+      "name": "Signature Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        400
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "respond-401",
+      "name": "Respond Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        560
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"success\":false,\"error\":\"invalid signature\"}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        400
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\":\"ok\"}"
+      },
+      "notes": "Acknowledge before processing - Sellf retries deliveries that don't get a 2xx."
+    },
+    {
+      "id": "switch-1",
+      "name": "Is Purchase?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        800,
+        400
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.event }}",
+                    "rightValue": "purchase.completed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "purchase.completed"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "notes": "Only purchase.completed flows through - other events (and Sellf's test deliveries) are dropped."
+    },
+    {
+      "id": "extract-1",
+      "name": "Extract Purchase Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        400
+      ],
+      "parameters": {
+        "jsCode": "const data = $input.first().json.body.data;\n\nreturn [{\n  json: {\n    email: data.customer.email,\n    firstName: data.customer.firstName || '',\n    lastName: data.customer.lastName || '',\n    productName: data.product.name,\n    amount: data.order.amount / 100,\n    currency: (data.order.currency || 'PLN').toUpperCase(),\n    sessionId: data.order.sessionId,\n    paymentIntentId: data.order.paymentIntentId,\n    needsInvoice: (data.invoice && data.invoice.needsInvoice) || false,\n    invoiceNip: (data.invoice && data.invoice.nip) || null,\n    invoiceCompany: (data.invoice && data.invoice.companyName) || null,\n    invoiceAddress: (data.invoice && data.invoice.address) || null,\n    invoiceCity: (data.invoice && data.invoice.city) || null,\n    invoicePostalCode: (data.invoice && data.invoice.postalCode) || null,\n    invoiceCountry: (data.invoice && data.invoice.country) || 'PL'\n  }\n}];"
+      }
+    },
+    {
+      "id": "switch-2",
+      "name": "Needs Invoice?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1400,
+        400
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.needsInvoice === true && !!$json.invoiceNip }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "invoice requested"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "consumer"
+        }
+      },
+      "notes": "B2B buyers (invoice + NIP) go through invoicing first; consumers skip straight to the email."
+    },
+    {
+      "id": "build-1",
+      "name": "Build Fakturownia Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        240
+      ],
+      "parameters": {
+        "jsCode": "const config = $('Configuration (EDIT ME)').first().json;\nconst d = $input.first().json;\nconst today = new Date().toISOString().split('T')[0];\n\nconst buyerName = d.invoiceCompany\n  || ((d.firstName || '') + ' ' + (d.lastName || '')).trim()\n  || d.email;\n\nconst invoice = {\n  api_token: config.fakturowniaApiToken,\n  invoice: {\n    kind: 'vat',\n    number: null,\n    sell_date: today,\n    issue_date: today,\n    payment_to: today,\n    payment_type: 'card',\n    status: 'paid',\n    currency: d.currency || 'PLN',\n    buyer_name: buyerName,\n    buyer_tax_no: d.invoiceNip,\n    buyer_street: d.invoiceAddress || '',\n    buyer_city: d.invoiceCity || '',\n    buyer_post_code: d.invoicePostalCode || '',\n    buyer_country: d.invoiceCountry || 'PL',\n    buyer_email: d.email,\n    positions: [{\n      name: d.productName,\n      quantity: 1,\n      total_price_gross: d.amount,\n      tax: Number(config.vatRate)\n    }]\n  }\n};\n\nreturn [{ json: {\n  _url: `https://${config.fakturowniaAccount}.fakturownia.pl/invoices.json`,\n  _body: JSON.stringify(invoice),\n} }];"
+      }
+    },
+    {
+      "id": "send-1",
+      "name": "Create Fakturownia Invoice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        240
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json._url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "={{ $json._body }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "notes": "The api_token travels in the body - Fakturownia's scheme. neverError: failures land in Log Error instead of killing the run."
+    },
+    {
+      "id": "email-1",
+      "name": "Send Thank-you Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2300,
+        400
+      ],
+      "parameters": {
+        "fromEmail": "={{ $('Configuration (EDIT ME)').item.json.fromEmail }}",
+        "toEmail": "={{ $('Extract Purchase Data').item.json.email }}",
+        "subject": "={{ 'Thank you for your purchase: ' + $('Extract Purchase Data').item.json.productName }}",
+        "emailType": "html",
+        "html": "={{ '<h2>Thank you for your purchase!</h2><p>Hi' + ($('Extract Purchase Data').item.json.firstName ? ' ' + $('Extract Purchase Data').item.json.firstName : '') + ',</p><p>Your purchase of <strong>' + $('Extract Purchase Data').item.json.productName + '</strong> is confirmed (' + $('Extract Purchase Data').item.json.amount + ' ' + $('Extract Purchase Data').item.json.currency + ').</p><p>You will find the product in your Sellf account. If you requested an invoice, it is on its way separately.</p><p>Enjoy!</p>' }}",
+        "options": {}
+      },
+      "notes": "Connect SMTP credentials and rewrite the copy in your voice. Sellf handles product delivery - this is the personal touch."
+    }
+  ],
+  "connections": {
+    "Sellf Webhook": {
+      "main": [
+        [
+          {
+            "node": "Configuration (EDIT ME)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Configuration (EDIT ME)": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature": {
+      "main": [
+        [
+          {
+            "node": "Signature Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Signature Valid?": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond OK": {
+      "main": [
+        [
+          {
+            "node": "Is Purchase?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Purchase?": {
+      "main": [
+        [
+          {
+            "node": "Extract Purchase Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Purchase Data": {
+      "main": [
+        [
+          {
+            "node": "Needs Invoice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Invoice?": {
+      "main": [
+        [
+          {
+            "node": "Build Fakturownia Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Thank-you Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Fakturownia Payload": {
+      "main": [
+        [
+          {
+            "node": "Create Fakturownia Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Fakturownia Invoice": {
+      "main": [
+        [
+          {
+            "node": "Send Thank-you Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "sellf"
+  }
+}
