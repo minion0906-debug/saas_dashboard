@@ -474,4 +474,4 @@ Elastic License 2.0 (source-available, not OSI open source). See [LICENSE](./LIC
 </div>
 
 ![](https://stats.techskills.academy/pixels/github?url=/readme/sellf)
-AAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAA
